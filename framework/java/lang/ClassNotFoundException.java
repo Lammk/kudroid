@@ -1,6 +1,6 @@
 package java.lang;
 
-public class ClassNotFoundException extends Exception {
+public class ClassNotFoundException extends ReflectiveOperationException {
 
     public ClassNotFoundException() {
     }

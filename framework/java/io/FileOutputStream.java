@@ -84,6 +84,15 @@ public class FileOutputStream extends OutputStream {
         return fd;
     }
 
+    private java.nio.channels.FileChannel channel;
+
+    public java.nio.channels.FileChannel getChannel() {
+        synchronized (this) {
+            if (channel == null) channel = new StreamFileChannel(null, this, path);
+            return channel;
+        }
+    }
+
     public void close() throws IOException {
         if (closed || handle < 0) {
             return;

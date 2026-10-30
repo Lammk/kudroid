@@ -66,40 +66,130 @@ public class FrameLayout extends ViewGroup {
         return p instanceof LayoutParams;
     }
 
-    @Override
-    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        // Children each get the full frame; the frame itself takes the space offered.
-        int maxWidth = 0;
-        int maxHeight = 0;
-        final int count = getChildCount();
-        for (int i = 0; i < count; i++) {
-            View child = getChildAt(i);
-            if (child == null || child.getVisibility() == GONE) continue;
-            child.measure(widthMeasureSpec, heightMeasureSpec);
-            maxWidth = Math.max(maxWidth, child.getMeasuredWidth());
-            maxHeight = Math.max(maxHeight, child.getMeasuredHeight());
-        }
-        if (MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED) {
-            maxWidth = Math.max(maxWidth, MeasureSpec.getSize(widthMeasureSpec));
-        }
-        if (MeasureSpec.getMode(heightMeasureSpec) != MeasureSpec.UNSPECIFIED) {
-            maxHeight = Math.max(maxHeight, MeasureSpec.getSize(heightMeasureSpec));
-        }
-        setMeasuredDimension(maxWidth, maxHeight);
-    }
+    private final java.util.ArrayList<View> mMatchParentChildren = new java.util.ArrayList<View>(1);
 
     @Override
-    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         final int count = getChildCount();
+        final boolean measureMatchParentChildren =
+                MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.EXACTLY
+                        || MeasureSpec.getMode(heightMeasureSpec) != MeasureSpec.EXACTLY;
+        mMatchParentChildren.clear();
+
+        int maxHeight = 0;
+        int maxWidth = 0;
+        int childState = 0;
         for (int i = 0; i < count; i++) {
-            View child = getChildAt(i);
+            final View child = getChildAt(i);
+            if (child == null || (!mMeasureAllChildren && child.getVisibility() == GONE)) continue;
+            measureChildWithMargins(child, widthMeasureSpec, 0, heightMeasureSpec, 0);
+            final LayoutParams lp = (LayoutParams) child.getLayoutParams();
+            maxWidth = Math.max(maxWidth, child.getMeasuredWidth() + lp.leftMargin + lp.rightMargin);
+            maxHeight = Math.max(maxHeight, child.getMeasuredHeight() + lp.topMargin + lp.bottomMargin);
+            childState = combineMeasuredStates(childState, child.getMeasuredState());
+            if (measureMatchParentChildren
+                    && (lp.width == LayoutParams.MATCH_PARENT || lp.height == LayoutParams.MATCH_PARENT)) {
+                mMatchParentChildren.add(child);
+            }
+        }
+
+        maxWidth += getPaddingLeft() + getPaddingRight();
+        maxHeight += getPaddingTop() + getPaddingBottom();
+        maxHeight = Math.max(maxHeight, getSuggestedMinimumHeight());
+        maxWidth = Math.max(maxWidth, getSuggestedMinimumWidth());
+        final android.graphics.drawable.Drawable foreground = getForeground();
+        if (foreground != null) {
+            maxHeight = Math.max(maxHeight, foreground.getMinimumHeight());
+            maxWidth = Math.max(maxWidth, foreground.getMinimumWidth());
+        }
+        setMeasuredDimension(resolveSizeAndState(maxWidth, widthMeasureSpec, childState),
+                resolveSizeAndState(maxHeight, heightMeasureSpec, childState << MEASURED_HEIGHT_STATE_SHIFT));
+
+        // Children that asked to match a parent whose size was only just decided are measured again.
+        if (mMatchParentChildren.size() > 1) {
+            for (int i = 0; i < mMatchParentChildren.size(); i++) {
+                final View child = mMatchParentChildren.get(i);
+                final ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) child.getLayoutParams();
+                final int childWidthMeasureSpec;
+                if (lp.width == LayoutParams.MATCH_PARENT) {
+                    final int width = Math.max(0, getMeasuredWidth() - getPaddingLeft() - getPaddingRight()
+                            - lp.leftMargin - lp.rightMargin);
+                    childWidthMeasureSpec = MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY);
+                } else {
+                    childWidthMeasureSpec = getChildMeasureSpec(widthMeasureSpec,
+                            getPaddingLeft() + getPaddingRight() + lp.leftMargin + lp.rightMargin, lp.width);
+                }
+                final int childHeightMeasureSpec;
+                if (lp.height == LayoutParams.MATCH_PARENT) {
+                    final int height = Math.max(0, getMeasuredHeight() - getPaddingTop() - getPaddingBottom()
+                            - lp.topMargin - lp.bottomMargin);
+                    childHeightMeasureSpec = MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY);
+                } else {
+                    childHeightMeasureSpec = getChildMeasureSpec(heightMeasureSpec,
+                            getPaddingTop() + getPaddingBottom() + lp.topMargin + lp.bottomMargin, lp.height);
+                }
+                child.measure(childWidthMeasureSpec, childHeightMeasureSpec);
+            }
+        }
+    }
+
+    private static final int DEFAULT_CHILD_GRAVITY = android.view.Gravity.TOP | android.view.Gravity.START;
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        layoutChildren(left, top, right, bottom, false);
+    }
+
+    void layoutChildren(int left, int top, int right, int bottom, boolean forceLeftGravity) {
+        final int count = getChildCount();
+        final int parentLeft = getPaddingLeft();
+        final int parentRight = right - left - getPaddingRight();
+        final int parentTop = getPaddingTop();
+        final int parentBottom = bottom - top - getPaddingBottom();
+
+        for (int i = 0; i < count; i++) {
+            final View child = getChildAt(i);
             if (child == null || child.getVisibility() == GONE) continue;
-            // Each child fills the frame unless it measured smaller.
-            int cw = child.getMeasuredWidth();
-            int ch = child.getMeasuredHeight();
-            if (cw <= 0) cw = r - l;
-            if (ch <= 0) ch = b - t;
-            child.layout(0, 0, cw, ch);
+            final LayoutParams lp = (LayoutParams) child.getLayoutParams();
+            final int width = child.getMeasuredWidth();
+            final int height = child.getMeasuredHeight();
+
+            int gravity = lp.gravity;
+            if (gravity == -1) gravity = DEFAULT_CHILD_GRAVITY;
+            final int absoluteGravity = android.view.Gravity.getAbsoluteGravity(gravity, getLayoutDirection());
+            final int verticalGravity = gravity & android.view.Gravity.VERTICAL_GRAVITY_MASK;
+
+            final int childLeft;
+            switch (absoluteGravity & android.view.Gravity.HORIZONTAL_GRAVITY_MASK) {
+                case android.view.Gravity.CENTER_HORIZONTAL:
+                    childLeft = parentLeft + (parentRight - parentLeft - width) / 2
+                            + lp.leftMargin - lp.rightMargin;
+                    break;
+                case android.view.Gravity.RIGHT:
+                    if (!forceLeftGravity) {
+                        childLeft = parentRight - width - lp.rightMargin;
+                        break;
+                    }
+                    // fall through
+                case android.view.Gravity.LEFT:
+                default:
+                    childLeft = parentLeft + lp.leftMargin;
+            }
+
+            final int childTop;
+            switch (verticalGravity) {
+                case android.view.Gravity.CENTER_VERTICAL:
+                    childTop = parentTop + (parentBottom - parentTop - height) / 2
+                            + lp.topMargin - lp.bottomMargin;
+                    break;
+                case android.view.Gravity.BOTTOM:
+                    childTop = parentBottom - height - lp.bottomMargin;
+                    break;
+                case android.view.Gravity.TOP:
+                default:
+                    childTop = parentTop + lp.topMargin;
+            }
+            child.layout(childLeft, childTop, childLeft + width, childTop + height);
         }
     }
 

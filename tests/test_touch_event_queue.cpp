@@ -106,5 +106,17 @@ int main() {
     Check(manyCount == 40 && manyEvents.size() == 40, "drainCoalesced drains full batch past 16 events");
     Check(manyEvents.back().action == 1, "final UP event is retained");
 
+    queue.reset(true);
+    const int64_t first = kudroid::guest_monotonic_ns() / 1000000ll;
+    queue.push(0, 0, 0);
+    const int64_t second = kudroid::guest_monotonic_ns() / 1000000ll;
+    Check(queue.tryPop(event) && event.eventTimeMillis >= first && event.eventTimeMillis <= second,
+          "queued input records arrival in the guest uptime clock");
+    queue.push(2, 1, 1);
+    queue.push(2, 2, 2);
+    const int64_t newest = kudroid::guest_monotonic_ns() / 1000000ll;
+    Check(queue.tryPop(event) && event.x == 2 && event.eventTimeMillis >= second && event.eventTimeMillis <= newest,
+          "coalesced motion retains its latest arrival time");
+
     return failures ? 1 : 0;
 }

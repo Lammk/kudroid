@@ -39,15 +39,57 @@ public abstract class Charset implements Comparable<Charset> {
 
         @Override
         public CharsetEncoder newEncoder() {
-            return new CharsetEncoder(this, 1.0f, 1.0f) {
+            final String name = name();
+            final boolean utf8 = name.equals("UTF-8");
+            final boolean utf16 = name.startsWith("UTF-16");
+            final boolean little = name.equals("UTF-16LE");
+            final boolean bom = name.equals("UTF-16");
+            final int maximum = name.equals("US-ASCII") ? 127 : 255;
+            CharsetEncoder encoder = new CharsetEncoder(this, utf16 ? 2 : 1, bom ? 4 : utf16 ? 2 : utf8 ? 3 : 1) {
+                private boolean needsBom = bom;
+                @Override protected void implReset() { needsBom = bom; }
                 @Override
                 protected CoderResult encodeLoop(CharBuffer in, ByteBuffer out) {
-                    while (in.hasRemaining() && out.hasRemaining()) {
-                        out.put((byte)(in.get() & 0xFF));
+                    if (needsBom && in.hasRemaining()) {
+                        if (out.remaining() < 2) return CoderResult.OVERFLOW;
+                        out.put((byte)0xfe).put((byte)0xff);
+                        needsBom = false;
                     }
-                    return in.hasRemaining() ? CoderResult.OVERFLOW : CoderResult.UNDERFLOW;
+                    while (in.hasRemaining()) {
+                        int start = in.position();
+                        int cp = in.get(start);
+                        int units = 1;
+                        if (cp >= 0xd800 && cp <= 0xdbff) {
+                            if (in.remaining() < 2) return CoderResult.UNDERFLOW;
+                            int low = in.get(start + 1);
+                            if (low < 0xdc00 || low > 0xdfff) return CoderResult.malformedForLength(1);
+                            cp = 0x10000 + ((cp - 0xd800) << 10) + low - 0xdc00;
+                            units = 2;
+                        } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+                            return CoderResult.malformedForLength(1);
+                        }
+                        if (!utf8 && !utf16 && cp > maximum) return CoderResult.unmappableForLength(units);
+                        int bytes = utf16 ? units * 2 : utf8 ? (cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4) : 1;
+                        if (out.remaining() < bytes) return CoderResult.OVERFLOW;
+                        if (utf16) {
+                            for (int i = 0; i < units; i++) {
+                                int c = in.get(start + i);
+                                out.put((byte)(little ? c : c >> 8));
+                                out.put((byte)(little ? c >> 8 : c));
+                            }
+                        } else if (utf8 && bytes > 1) {
+                            out.put((byte)((bytes == 2 ? 0xc0 : bytes == 3 ? 0xe0 : 0xf0) | cp >> (6 * (bytes - 1))));
+                            for (int i = bytes - 2; i >= 0; i--) out.put((byte)(0x80 | (cp >> (6 * i) & 0x3f)));
+                        } else {
+                            out.put((byte)cp);
+                        }
+                        in.position(start + units);
+                    }
+                    return CoderResult.UNDERFLOW;
                 }
             };
+            if (utf16) encoder.replaceWith(little ? new byte[]{(byte)0xfd,(byte)0xff} : new byte[]{(byte)0xff,(byte)0xfd});
+            return encoder;
         }
     }
 
@@ -68,9 +110,9 @@ public abstract class Charset implements Comparable<Charset> {
     }
 
     private static void registerCharset(Charset cs) {
-        sCache.put(cs.name().toUpperCase(), cs);
+        sCache.put(cs.name().toUpperCase(java.util.Locale.ROOT), cs);
         for (String alias : cs.aliases()) {
-            sCache.put(alias.toUpperCase(), cs);
+            sCache.put(alias.toUpperCase(java.util.Locale.ROOT), cs);
         }
     }
 
@@ -92,17 +134,23 @@ public abstract class Charset implements Comparable<Charset> {
         if (charsetName == null) {
             throw new IllegalArgumentException("charsetName == null");
         }
-        Charset cs = sCache.get(charsetName.trim().toUpperCase());
+        if (charsetName.isEmpty()) throw new IllegalCharsetNameException(charsetName);
+        for (int i = 0; i < charsetName.length(); i++) {
+            char c = charsetName.charAt(i);
+            boolean alphanumeric = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9';
+            if (!alphanumeric && (i == 0 || c != '-' && c != '+' && c != ':' && c != '_' && c != '.'))
+                throw new IllegalCharsetNameException(charsetName);
+        }
+        Charset cs = sCache.get(charsetName.toUpperCase(java.util.Locale.ROOT));
         if (cs != null) {
             return cs;
         }
-        Charset created = new SimpleCharset(charsetName, new String[]{charsetName});
-        registerCharset(created);
-        return created;
+        throw new UnsupportedCharsetException(charsetName);
     }
 
     public static boolean isSupported(String charsetName) {
-        return charsetName != null;
+        try { forName(charsetName); return true; }
+        catch (UnsupportedCharsetException error) { return false; }
     }
 
     public static Charset defaultCharset() {
@@ -128,7 +176,12 @@ public abstract class Charset implements Comparable<Charset> {
     public abstract CharsetEncoder newEncoder();
 
     public final ByteBuffer encode(CharBuffer cb) {
-        return newEncoder().encode(cb);
+        try {
+            return newEncoder().onMalformedInput(CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(CodingErrorAction.REPLACE).encode(cb);
+        } catch (CharacterCodingException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     public final ByteBuffer encode(String str) {

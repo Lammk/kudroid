@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -289,6 +290,7 @@ void PutFsbHeader(unsigned char* p, uint32_t shs, uint32_t dataSize) {
 }  // namespace
 
 int main() {
+    if (::getenv("KUDROID_TRACE_HOT") == nullptr) ::setenv("KUDROID_TRACE_HOT", "1", 1);
     std::printf("=== audio-thread IO trace test ===\n");
 
     const std::filesystem::path tmp = std::filesystem::temp_directory_path() /

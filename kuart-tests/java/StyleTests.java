@@ -34,7 +34,70 @@ public final class StyleTests {
         try { precedence(); } catch (Throwable t) { TestSupport.fail("precedence", t); }
         try { defaultStyleResource(); } catch (Throwable t) { TestSupport.fail("defaultStyleResource", t); }
         try { noThemeAndParents(); } catch (Throwable t) { TestSupport.fail("noThemeAndParents", t); }
+        try { scalarConfigurations(); } catch (Throwable t) { TestSupport.fail("scalarConfigurations", t); }
         return TestSupport.report.toString();
+    }
+
+    static void scalarConfigurations() {
+        android.content.res.Configuration config = new android.content.res.Configuration();
+        config.screenWidthDp = 414;
+        config.screenHeightDp = 896;
+        config.smallestScreenWidthDp = 414;
+        config.orientation = android.content.res.Configuration.ORIENTATION_PORTRAIT;
+        config.uiMode = android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+                | android.content.res.Configuration.UI_MODE_NIGHT_NO;
+        config.densityDpi = 320;
+        Resources r = new Resources(null, null, config);
+        Resources.Theme applied = theme(r);
+        Resources.Theme copied = r.newTheme();
+        copied.setTo(applied);
+        Resources.Theme layered = theme(r);
+        layered.applyStyle(STYLE_XML, true);
+        layered.applyStyle(STYLE_DEF, false);
+        check(!r.getBoolean(0x7f030000), "phone rejects tablet scalar variant");
+        check(r.getColor(0x7f030001) == 0xffeeeeee, "day scalar selected");
+        check(r.getColor(0x7f030004) == 0xffeeeeee, "reference preserves day configuration");
+        check(r.getInteger(0x7f030002) == 1, "portrait rejects landscape scalar");
+        check(r.getInteger(0x7f030003) == 28, "future SDK scalar rejected");
+        check(r.getInteger(0x7f030005) == 480, "density prefers appropriate downscaling");
+        check("day".equals(r.getString(0x7f030006)), "string lookup uses configuration");
+        android.util.TypedValue value = new android.util.TypedValue();
+        r.getValue(0x7f030007, value, true);
+        check("res/day.xml".contentEquals(value.string), "XML path uses configuration");
+        config.uiMode = android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+                | android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        config.smallestScreenWidthDp = 700;
+        config.screenWidthDp = 1000;
+        config.screenHeightDp = 700;
+        config.orientation = android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        config.densityDpi = 160;
+        r.updateConfiguration(config, null);
+        android.util.TypedValue attribute = new android.util.TypedValue();
+        check(applied.resolveAttribute(PADDING_TOP, attribute, true) && attribute.data == (17 << 8),
+                "existing theme replays styles after night configuration change");
+        check(copied.resolveAttribute(PADDING_TOP, attribute, true) && attribute.data == (17 << 8),
+                "copied theme retains style history across configuration changes");
+        check(!applied.resolveAttribute(ATTR_DEF_STYLE, attribute, false),
+                "theme rebase removes attributes absent from changed style");
+        check(layered.resolveAttribute(MIN_WIDTH, attribute, true) && attribute.data == (30 << 8),
+                "theme rebase preserves non-forced overlay precedence");
+        check(layered.resolveAttribute(MIN_HEIGHT, attribute, true) && attribute.data == (22 << 8),
+                "theme rebase fills newly absent attributes from later styles");
+        check(r.getBoolean(0x7f030000), "tablet scalar selected after configuration change");
+        check(r.getColor(0x7f030004) == 0xff111111, "reference preserves changed night configuration");
+        check("night".equals(r.getString(0x7f030006)), "string lookup changes with night mode");
+        check(r.getInteger(0x7f030002) == 2, "landscape scalar selected");
+        check(r.getInteger(0x7f030005) == 160, "exact density scalar selected");
+        config.densityDpi = 180;
+        r.updateConfiguration(config, null);
+        check(r.getInteger(0x7f030008) == 160, "density selects closer low bucket");
+        check(r.getInteger(0x7f030009) == 65534, "anydpi beats density buckets");
+        config.uiMode = android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+                | android.content.res.Configuration.UI_MODE_NIGHT_NO;
+        r.updateConfiguration(config, null);
+        applied.rebase();
+        check(applied.resolveAttribute(PADDING_TOP, attribute, true) && attribute.data == (7 << 8),
+                "explicit theme rebase follows light configuration");
     }
 
     static CompiledXmlResourceParser element(AxmlBuilder b) throws Exception {

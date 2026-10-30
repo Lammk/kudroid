@@ -7,6 +7,7 @@
 #ifndef KUDROID_KUART_DEXCLASS_H
 #define KUDROID_KUART_DEXCLASS_H
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -69,6 +70,8 @@ struct DexMethod {
     // compile attempt and cannot corrupt anything. Making them atomic would put a memory
     // barrier on the hottest path in the interpreter to protect a heuristic.
     uint32_t call_count = 0;
+    // Cache the name-based telemetry decision; shallow calls always trace.
+    mutable uint8_t telemetry_kind = 0;
 
     // Compiled entry point, or null. `jit_state` distinguishes "not tried yet" from
     // "tried and refused", so a method the compiler declined is not re-attempted on
@@ -103,6 +106,8 @@ public:
     const char* descriptor = nullptr;  // "Lcom/foo/Bar;"
     uint32_t access_flags = 0;
     Status status = Status::kNotLoaded;
+    // Set by the first EnsureInitialized caller; prevents a second <clinit>.
+    std::atomic<bool> initialization_started{false};
 
     DexClass* superclass = nullptr;
     std::vector<DexClass*> interfaces;

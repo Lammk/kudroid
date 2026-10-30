@@ -54,21 +54,24 @@ public class BitmapFactory {
         }
     }
 
-    /**
-     * Decoders.
-     *
-     * KuDroid has no image decoder, so these report failure by returning null — which
-     * is exactly what Android does for undecodable input, and callers already handle
-     * it. outWidth/outHeight are set to -1 to match the platform's "nothing decoded"
-     * convention rather than leaving a misleading 0.
-     */
+    private static native int[] nativeDecodeByteArray(byte[] data, int offset, int length,
+                                                      int[] outDim, boolean justBounds);
+
     public static Bitmap decodeFile(String pathName) {
         return decodeFile(pathName, null);
     }
 
     public static Bitmap decodeFile(String pathName, Options opts) {
-        markUndecodable(opts);
-        return null;
+        if (pathName == null) {
+            markUndecodable(opts);
+            return null;
+        }
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(pathName)) {
+            return decodeStream(fis, null, opts);
+        } catch (Throwable t) {
+            markUndecodable(opts);
+            return null;
+        }
     }
 
     public static Bitmap decodeStream(java.io.InputStream is) {
@@ -76,8 +79,23 @@ public class BitmapFactory {
     }
 
     public static Bitmap decodeStream(java.io.InputStream is, Rect outPadding, Options opts) {
-        markUndecodable(opts);
-        return null;
+        if (is == null) {
+            markUndecodable(opts);
+            return null;
+        }
+        try {
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int r;
+            while ((r = is.read(buf)) != -1) {
+                baos.write(buf, 0, r);
+            }
+            byte[] bytes = baos.toByteArray();
+            return decodeByteArray(bytes, 0, bytes.length, opts);
+        } catch (Throwable t) {
+            markUndecodable(opts);
+            return null;
+        }
     }
 
     public static Bitmap decodeByteArray(byte[] data, int offset, int length) {
@@ -85,8 +103,30 @@ public class BitmapFactory {
     }
 
     public static Bitmap decodeByteArray(byte[] data, int offset, int length, Options opts) {
-        markUndecodable(opts);
-        return null;
+        if (data == null || offset < 0 || length <= 0 || offset + length > data.length) {
+            markUndecodable(opts);
+            return null;
+        }
+        boolean justBounds = (opts != null && opts.inJustDecodeBounds);
+        int[] outDim = new int[2];
+        try {
+            int[] pixels = nativeDecodeByteArray(data, offset, length, outDim, justBounds);
+            if (outDim[0] <= 0 || outDim[1] <= 0) {
+                markUndecodable(opts);
+                return null;
+            }
+            if (opts != null) {
+                opts.outWidth = outDim[0];
+                opts.outHeight = outDim[1];
+            }
+            if (justBounds || pixels == null) {
+                return null;
+            }
+            return Bitmap.createBitmap(pixels, outDim[0], outDim[1], Bitmap.Config.ARGB_8888);
+        } catch (Throwable t) {
+            markUndecodable(opts);
+            return null;
+        }
     }
 
     public static Bitmap decodeResource(android.content.res.Resources res, int id) {
@@ -94,6 +134,21 @@ public class BitmapFactory {
     }
 
     public static Bitmap decodeResource(android.content.res.Resources res, int id, Options opts) {
+        if (res == null) {
+            markUndecodable(opts);
+            return null;
+        }
+        try {
+            android.util.TypedValue value = new android.util.TypedValue();
+            res.getValue(id, value, true);
+            if (value.string != null) {
+                String path = value.string.toString();
+                byte[] data = res.readResource(path);
+                if (data != null && data.length > 0) {
+                    return decodeByteArray(data, 0, data.length, opts);
+                }
+            }
+        } catch (Throwable ignored) {}
         markUndecodable(opts);
         return null;
     }
@@ -104,8 +159,16 @@ public class BitmapFactory {
 
     public static Bitmap decodeFileDescriptor(java.io.FileDescriptor fd, Rect outPadding,
                                               Options opts) {
-        markUndecodable(opts);
-        return null;
+        if (fd == null) {
+            markUndecodable(opts);
+            return null;
+        }
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(fd)) {
+            return decodeStream(fis, outPadding, opts);
+        } catch (Throwable t) {
+            markUndecodable(opts);
+            return null;
+        }
     }
 
     private static void markUndecodable(Options opts) {

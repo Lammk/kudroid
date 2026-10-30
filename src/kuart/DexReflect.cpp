@@ -39,7 +39,7 @@ DexClass* DexReflect::ForName(const char* dotted_name) {
     if (linker_ == nullptr || dotted_name == nullptr) return nullptr;
 
     const std::string descriptor = DottedToDescriptor(dotted_name);
-    DexClass* klass = linker_->FindClass(descriptor.c_str());
+    DexClass* klass = linker_->FindClassNoStub(descriptor.c_str());
     // Auto-stubbed classes are placeholders with no members; treat them as absent
     // rather than returning something the caller cannot use. See DexClass::is_stub.
     if (klass == nullptr || klass->is_stub) {

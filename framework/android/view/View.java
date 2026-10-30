@@ -12,12 +12,70 @@ import android.os.Bundle;
  * provides basic layout/drawing simulations.
  */
 public class View implements KeyEvent.Callback, android.graphics.drawable.Drawable.Callback {
+    private static final class FloatViewProperty extends android.util.FloatProperty<View> {
+        private final int mKind;
+        FloatViewProperty(String name, int kind) {
+            super(name);
+            mKind = kind;
+        }
+
+        @Override
+        public void setValue(View v, float value) {
+            switch (mKind) {
+                case 0: v.setAlpha(value); break;
+                case 1: v.setTranslationX(value); break;
+                case 2: v.setTranslationY(value); break;
+                case 3: v.setTranslationZ(value); break;
+                case 4: v.setX(value); break;
+                case 5: v.setY(value); break;
+                case 6: v.setZ(value); break;
+                case 7: v.setRotation(value); break;
+                case 8: v.setRotationX(value); break;
+                case 9: v.setRotationY(value); break;
+                case 10: v.setScaleX(value); break;
+                default: v.setScaleY(value); break;
+            }
+        }
+
+        @Override
+        public Float get(View v) {
+            switch (mKind) {
+                case 0: return v.getAlpha();
+                case 1: return v.getTranslationX();
+                case 2: return v.getTranslationY();
+                case 3: return v.getTranslationZ();
+                case 4: return v.getX();
+                case 5: return v.getY();
+                case 6: return v.getZ();
+                case 7: return v.getRotation();
+                case 8: return v.getRotationX();
+                case 9: return v.getRotationY();
+                case 10: return v.getScaleX();
+                default: return v.getScaleY();
+            }
+        }
+    }
+
+    public static final android.util.Property<View, Float> ALPHA = new FloatViewProperty("alpha", 0);
+    public static final android.util.Property<View, Float> TRANSLATION_X = new FloatViewProperty("translationX", 1);
+    public static final android.util.Property<View, Float> TRANSLATION_Y = new FloatViewProperty("translationY", 2);
+    public static final android.util.Property<View, Float> TRANSLATION_Z = new FloatViewProperty("translationZ", 3);
+    public static final android.util.Property<View, Float> X = new FloatViewProperty("x", 4);
+    public static final android.util.Property<View, Float> Y = new FloatViewProperty("y", 5);
+    public static final android.util.Property<View, Float> Z = new FloatViewProperty("z", 6);
+    public static final android.util.Property<View, Float> ROTATION = new FloatViewProperty("rotation", 7);
+    public static final android.util.Property<View, Float> ROTATION_X = new FloatViewProperty("rotationX", 8);
+    public static final android.util.Property<View, Float> ROTATION_Y = new FloatViewProperty("rotationY", 9);
+    public static final android.util.Property<View, Float> SCALE_X = new FloatViewProperty("scaleX", 10);
+    public static final android.util.Property<View, Float> SCALE_Y = new FloatViewProperty("scaleY", 11);
+
     /** view visibility: visible. */
     public static final int VISIBLE = 0;
     /** view visibility: invisible. */
     public static final int INVISIBLE = 4;
     /** view visibility: disappears. */
     public static final int GONE = 8;
+    private static final int[] VISIBILITY_FLAGS = { VISIBLE, INVISIBLE, GONE };
 
     /** Used to mark a View that has no ID. */
     public static final int NO_ID = -1;
@@ -25,9 +83,9 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     /** measurement specification mode: not specified. */
     public static final int UNSPECIFIED = 0;
     /** measurement specification mode: exact. */
-    public static final int EXACTLY = 1;
+    public static final int EXACTLY = 0x40000000;
     /** measurement specification mode: most. */
-    public static final int AT_MOST = 2;
+    public static final int AT_MOST = 0x80000000;
 
     protected final Context mContext;
     private int mLeft;
@@ -49,6 +107,11 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     private long mTouchDownTime;
     private boolean mLongClickFired;
     private boolean mLaidOut;
+    private boolean mLayoutRequested = true;
+    private boolean mLayoutRequired;
+    private boolean mMeasureValid;
+    private int mOldWidthMeasureSpec;
+    private int mOldHeightMeasureSpec;
     private java.util.ArrayList<OnLayoutChangeListener> mLayoutChangeListeners;
     private int mMeasuredWidth;
     private int mMeasuredHeight;
@@ -318,7 +381,7 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
                     mTag = a.getText(attr);
                     break;
                 case com.android.internal.R.styleable.View_visibility:
-                    mVisibility = a.getInt(attr, VISIBLE);
+                    mVisibility = VISIBILITY_FLAGS[a.getInt(attr, 0)];
                     break;
                 case com.android.internal.R.styleable.View_minWidth:
                     mMinWidth = a.getDimensionPixelSize(attr, 0);
@@ -546,6 +609,7 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      */
     public void layout(int l, int t, int r, int b) {
         final boolean changed = (l != mLeft) || (t != mTop) || (r != mRight) || (b != mBottom);
+        final boolean layoutNeeded = changed || mLayoutRequired || mLayoutRequested;
         final int oldLeft = mLeft, oldTop = mTop, oldRight = mRight, oldBottom = mBottom;
         final int oldWidth = mRight - mLeft;
         final int oldHeight = mBottom - mTop;
@@ -554,16 +618,22 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
         mRight = r;
         mBottom = b;
         mLaidOut = true;
+        if (layoutNeeded) {
+            mLayoutRequested = false;
+            mLayoutRequired = false;
+        }
         final int width = r - l;
         final int height = b - t;
         if (width != oldWidth || height != oldHeight) {
             onSizeChanged(width, height, oldWidth, oldHeight);
         }
-        mInLayout = true;
-        try {
-            onLayout(changed, l, t, r, b);
-        } finally {
-            mInLayout = false;
+        if (layoutNeeded) {
+            mInLayout = true;
+            try {
+                onLayout(changed, l, t, r, b);
+            } finally {
+                mInLayout = false;
+            }
         }
         if (changed && mLayoutChangeListeners != null) {
             OnLayoutChangeListener[] listeners = mLayoutChangeListeners.toArray(
@@ -589,19 +659,9 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
         return mLaidOut;
     }
 
-    /**
-     * True while a layout pass is owed to this view.
-     *
-     * The inverse of isLaidOut() under KuDroid's model: requestLayout() clears mLaidOut and
-     * layout() sets it, so "not laid out" and "layout requested" are the same state. Android
-     * tracks them separately because it batches passes; here a request is served on the next
-     * top-down render.
-     *
-     * Declared on View rather than only on ViewGroup because ViewParent requires it and
-     * ViewGroup inherits it from here.
-     */
+    /** True while a layout pass is owed to this view. */
     public boolean isLayoutRequested() {
-        return !mLaidOut;
+        return mLayoutRequested;
     }
 
     /**
@@ -654,6 +714,7 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      */
     public void setParent(ViewGroup parent) {
         mParent = parent;
+        resolveRtlPropertiesIfNeeded();
     }
 
     /**
@@ -779,7 +840,8 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public KeyEvent.DispatcherState getKeyDispatcherState() {
-        return null;
+        Window window = getRootView().mTraversalWindow;
+        return mAttachedToWindow && window != null ? window.getKeyDispatcherState() : null;
     }
 
     // System UI visibility (deprecated in API 30 but still read by compat code).
@@ -806,6 +868,7 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     public void setSystemUiVisibility(int visibility) {
         if (mSystemUiVisibility == visibility) return;
         mSystemUiVisibility = visibility;
+        requestApplyInsets();
         if (mOnSystemUiVisibilityChangeListener != null) {
             mOnSystemUiVisibilityChangeListener.onSystemUiVisibilityChange(visibility);
         }
@@ -830,12 +893,29 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     public void setLayoutParams(ViewGroup.LayoutParams params) {
         if (params == null) throw new NullPointerException("Layout parameters cannot be null");
         mLayoutParams = params;
+        resolveLayoutParams();
         requestLayout();
     }
 
     /** Assign layout parameters without scheduling a layout (the parent does that once). */
     void setLayoutParamsNoRequest(ViewGroup.LayoutParams params) {
         mLayoutParams = params;
+        resolveLayoutParams();
+    }
+
+    public void resolveLayoutParams() {
+        if (mLayoutParams != null) mLayoutParams.resolveLayoutDirection(getLayoutDirection());
+    }
+
+    public boolean resolveRtlPropertiesIfNeeded() {
+        final int direction = getLayoutDirection();
+        if (mResolvedLayoutDirection == direction) return false;
+        mResolvedLayoutDirection = direction;
+        mMeasureValid = false;
+        mLayoutRequested = true;
+        resolveLayoutParams();
+        onRtlPropertiesChanged(direction);
+        return true;
     }
 
     // IME attachment.
@@ -969,15 +1049,23 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      * The default reports zero size, matching Android's behaviour for a bare View.
      */
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        setMeasuredDimension(getDefaultSize(0, widthMeasureSpec),
-                             getDefaultSize(0, heightMeasureSpec));
+        setMeasuredDimension(getDefaultSize(getSuggestedMinimumWidth(), widthMeasureSpec),
+                             getDefaultSize(getSuggestedMinimumHeight(), heightMeasureSpec));
     }
 
     /**
      * measure view (called by parent).
      */
     public void measure(int widthMeasureSpec, int heightMeasureSpec) {
+        resolveRtlPropertiesIfNeeded();
+        if (mMeasureValid && !mLayoutRequested
+                && widthMeasureSpec == mOldWidthMeasureSpec
+                && heightMeasureSpec == mOldHeightMeasureSpec) return;
         onMeasure(widthMeasureSpec, heightMeasureSpec);
+        mOldWidthMeasureSpec = widthMeasureSpec;
+        mOldHeightMeasureSpec = heightMeasureSpec;
+        mMeasureValid = true;
+        mLayoutRequired = true;
     }
 
     /**
@@ -991,11 +1079,11 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public final int getMeasuredWidth() {
-        return mMeasuredWidth;
+        return mMeasuredWidth & MEASURED_SIZE_MASK;
     }
 
     public final int getMeasuredHeight() {
-        return mMeasuredHeight;
+        return mMeasuredHeight & MEASURED_SIZE_MASK;
     }
 
     /**
@@ -1020,26 +1108,24 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      */
     public static class MeasureSpec {
         public static final int UNSPECIFIED = 0;
-        public static final int EXACTLY = 1;
-        public static final int AT_MOST = 2;
+        public static final int EXACTLY = 0x40000000;
+        public static final int AT_MOST = 0x80000000;
 
         private static final int MODE_SHIFT = 30;
         private static final int MODE_MASK = 0x3 << MODE_SHIFT;
 
         public static int makeMeasureSpec(int size, int mode) {
-            return (size & ~MODE_MASK) | (mode << MODE_SHIFT);
+            return (size & ~MODE_MASK) | (mode & MODE_MASK);
         }
 
         public static int getMode(int measureSpec) {
-            return (measureSpec & MODE_MASK) >>> MODE_SHIFT;
+            return measureSpec & MODE_MASK;
         }
 
         public static int getSize(int measureSpec) {
             return measureSpec & ~MODE_MASK;
         }
     }
-
-    private int mBackgroundColor = 0;
 
     /**
      * draw views.
@@ -1054,16 +1140,62 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     /**
-     * draw view (called by parent).
+     * Draws this view in its own coordinate space: (0, 0) is its top-left corner, and the canvas
+     * is already offset by the scroll position. Order matches Android: background, content,
+     * children, foreground.
      */
     public void draw(Canvas canvas) {
-        if (mVisibility != VISIBLE || canvas == null) return;
-        if (mBackgroundColor != 0) {
-            android.graphics.Paint p = new android.graphics.Paint();
-            p.setColor(mBackgroundColor);
-            canvas.drawRect(mLeft, mTop, mRight, mBottom, p);
-        }
+        if (canvas == null) return;
+        drawBackground(canvas);
         onDraw(canvas);
+        dispatchDraw(canvas);
+        onDrawForeground(canvas);
+    }
+
+    /** The background does not scroll with the content. */
+    private void drawBackground(Canvas canvas) {
+        final android.graphics.drawable.Drawable background = mBackground;
+        if (background == null) return;
+        final int width = mRight - mLeft;
+        final int height = mBottom - mTop;
+        final android.graphics.Rect bounds = background.getBounds();
+        if (bounds.left != 0 || bounds.top != 0 || bounds.right != width || bounds.bottom != height) {
+            background.setBounds(0, 0, width, height);
+        }
+        if ((mScrollX | mScrollY) != 0) {
+            canvas.translate(mScrollX, mScrollY);
+            background.draw(canvas);
+            canvas.translate(-mScrollX, -mScrollY);
+        } else {
+            background.draw(canvas);
+        }
+    }
+
+    /**
+     * Draws this view as a child of {@code parent}: positions the canvas at the view's frame,
+     * applies its transform, alpha and clip, then draws it. Returns false (nothing animates).
+     */
+    boolean draw(Canvas canvas, ViewGroup parent, long drawingTime) {
+        computeScroll();
+        final float alpha = mAlpha;
+        if (alpha <= 0f) return false;
+        final int count = canvas.save();
+        canvas.translate(mLeft - mScrollX, mTop - mScrollY);
+        if (!hasIdentityMatrix()) {
+            canvas.concat(getMatrix());
+        }
+        if (parent == null || parent.getClipChildren()) {
+            canvas.clipRect(mScrollX, mScrollY, mScrollX + (mRight - mLeft), mScrollY + (mBottom - mTop));
+        }
+        if (mClipBounds != null) {
+            canvas.clipRect(mClipBounds);
+        }
+        if (alpha < 1f) {
+            canvas.saveLayerAlpha(0, 0, 0, 0, Math.round(alpha * 255));
+        }
+        draw(canvas);
+        canvas.restoreToCount(count);
+        return false;
     }
 
     /**
@@ -1098,7 +1230,14 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      * has none.
      */
     public void setBackground(android.graphics.drawable.Drawable background) {
+        setBackgroundDrawable(background);
+    }
+
+    /** Stores the background; subclasses override this spelling and call super. */
+    public void setBackgroundDrawable(android.graphics.drawable.Drawable background) {
         if (mBackground == background) return;
+        final int oldMinWidth = getSuggestedMinimumWidth();
+        final int oldMinHeight = getSuggestedMinimumHeight();
         if (mBackground != null) {
             mBackground.setCallback(null);
         }
@@ -1110,6 +1249,9 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
                 background.setState(getDrawableState());
             }
             applyBackgroundTint();
+        }
+        if (oldMinWidth != getSuggestedMinimumWidth() || oldMinHeight != getSuggestedMinimumHeight()) {
+            requestLayout();
         }
         invalidate();
     }
@@ -1164,16 +1306,12 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      * set the background of the view.
      */
     public void setBackgroundColor(int color) {
-        mBackgroundColor = color;
-        invalidate();
-    }
-
-    /**
-     * set the view's background drawable.
-     */
-    /** Deprecated spelling; kept because older code calls it. Same storage as setBackground. */
-    public void setBackgroundDrawable(android.graphics.drawable.Drawable background) {
-        setBackground(background);
+        if (mBackground instanceof android.graphics.drawable.ColorDrawable) {
+            ((android.graphics.drawable.ColorDrawable) mBackground).setColor(color);
+            invalidate();
+        } else {
+            setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(color));
+        }
     }
 
     /**
@@ -1213,6 +1351,8 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
         }
         if (root != this) {
             root.invalidate();
+        } else if (mAttachedToWindow && mTraversalWindow != null) {
+            mTraversalWindow.scheduleTraversal();
         }
     }
 
@@ -1220,9 +1360,12 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
      * Ask for another measure + layout pass. Same top-down model as invalidate().
      */
     public void requestLayout() {
-        mLaidOut = false;
+        mLayoutRequested = true;
+        mMeasureValid = false;
         if (mParent != null) {
             mParent.requestLayout();
+        } else if (mAttachedToWindow && mTraversalWindow != null) {
+            mTraversalWindow.scheduleTraversal();
         }
     }
 
@@ -1341,13 +1484,21 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public void requestFitSystemWindows() {
-        if (mParent instanceof View) {
-            ((View) mParent).requestFitSystemWindows();
-        }
+        Window window = getRootView().mTraversalWindow;
+        if (window != null) window.requestApplyInsets();
     }
 
     public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        if (fitSystemWindows(new android.graphics.Rect(insets.getSystemWindowInsetLeft(),
+                insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(),
+                insets.getSystemWindowInsetBottom()))) return insets.consumeSystemWindowInsets();
         return insets;
+    }
+
+    protected boolean fitSystemWindows(android.graphics.Rect insets) {
+        if (!mFitsSystemWindows) return false;
+        setPadding(insets.left, insets.top, insets.right, insets.bottom);
+        return true;
     }
 
     public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
@@ -1359,11 +1510,14 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public WindowInsets getRootWindowInsets() {
-        return null;
+        Window window = getRootView().mTraversalWindow;
+        return mAttachedToWindow && window != null ? window.getRootWindowInsets() : null;
     }
 
     public WindowInsets computeSystemWindowInsets(WindowInsets in, android.graphics.Rect outLocalInsets) {
-        return in;
+        outLocalInsets.set(in.getSystemWindowInsetLeft(), in.getSystemWindowInsetTop(),
+                in.getSystemWindowInsetRight(), in.getSystemWindowInsetBottom());
+        return in.consumeSystemWindowInsets().inset(outLocalInsets);
     }
 
     public boolean fitsSystemWindows() {
@@ -1371,7 +1525,9 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public void setFitsSystemWindows(boolean fitSystemWindows) {
-        mFitsSystemWindows = fitSystemWindows;
+        if (mFitsSystemWindows != fitSystemWindows) {
+            mFitsSystemWindows = fitSystemWindows; requestApplyInsets();
+        }
     }
 
     public boolean getFitsSystemWindows() {
@@ -1505,22 +1661,73 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     // Property transforms are stored for getters and animators; drawing does not apply them.
+    private ViewOverlay mOverlay;
+
+    /** Drawables added here are kept for the overlay; they are not drawn. */
+    public ViewOverlay getOverlay() {
+        if (mOverlay == null) mOverlay = new ViewOverlay(this);
+        return mOverlay;
+    }
+
+    private ViewPropertyAnimator mAnimator;
+
+    /** The animator for this view's properties; created on first use. */
+    public ViewPropertyAnimator animate() {
+        if (mAnimator == null) mAnimator = new ViewPropertyAnimator(this);
+        return mAnimator;
+    }
+
     public float getAlpha() { return mAlpha; }
-    public void setAlpha(float alpha) { mAlpha = alpha; invalidate(); }
+    public void setAlpha(float alpha) {
+        if (mAlpha != alpha) {
+            mAlpha = alpha;
+            invalidate();
+        }
+    }
     public float getTranslationX() { return mTranslationX; }
-    public void setTranslationX(float v) { mTranslationX = v; invalidate(); }
+    public void setTranslationX(float v) {
+        if (mTranslationX != v) {
+            mTranslationX = v;
+            invalidate();
+        }
+    }
     public float getTranslationY() { return mTranslationY; }
-    public void setTranslationY(float v) { mTranslationY = v; invalidate(); }
+    public void setTranslationY(float v) {
+        if (mTranslationY != v) {
+            mTranslationY = v;
+            invalidate();
+        }
+    }
     public float getTranslationZ() { return mTranslationZ; }
-    public void setTranslationZ(float v) { mTranslationZ = v; invalidate(); }
+    public void setTranslationZ(float v) {
+        if (mTranslationZ != v) {
+            mTranslationZ = v;
+            invalidate();
+        }
+    }
     public float getElevation() { return mElevation; }
     public void setElevation(float v) { mElevation = v; }
     public float getScaleX() { return mScaleX; }
-    public void setScaleX(float v) { mScaleX = v; invalidate(); }
+    public void setScaleX(float v) {
+        if (mScaleX != v) {
+            mScaleX = v;
+            invalidate();
+        }
+    }
     public float getScaleY() { return mScaleY; }
-    public void setScaleY(float v) { mScaleY = v; invalidate(); }
+    public void setScaleY(float v) {
+        if (mScaleY != v) {
+            mScaleY = v;
+            invalidate();
+        }
+    }
     public float getRotation() { return mRotation; }
-    public void setRotation(float v) { mRotation = v; invalidate(); }
+    public void setRotation(float v) {
+        if (mRotation != v) {
+            mRotation = v;
+            invalidate();
+        }
+    }
     public float getPivotX() { return mPivotSet ? mPivotX : getWidth() / 2f; }
     public void setPivotX(float v) { mPivotX = v; mPivotSet = true; }
     public float getPivotY() { return mPivotSet ? mPivotY : getHeight() / 2f; }
@@ -1537,8 +1744,18 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
 
     public int getMinimumWidth() { return mMinWidth; }
     public int getMinimumHeight() { return mMinHeight; }
-    public void setMinimumWidth(int minWidth) { mMinWidth = minWidth; requestLayout(); }
-    public void setMinimumHeight(int minHeight) { mMinHeight = minHeight; requestLayout(); }
+    public void setMinimumWidth(int minWidth) {
+        if (mMinWidth != minWidth) {
+            mMinWidth = minWidth;
+            requestLayout();
+        }
+    }
+    public void setMinimumHeight(int minHeight) {
+        if (mMinHeight != minHeight) {
+            mMinHeight = minHeight;
+            requestLayout();
+        }
+    }
 
     protected int getSuggestedMinimumWidth() {
         return mBackground == null ? mMinWidth : Math.max(mMinWidth, mBackground.getMinimumWidth());
@@ -1586,7 +1803,8 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
 
     /** Mark this view as needing layout without asking ancestors. */
     public void forceLayout() {
-        mLaidOut = false;
+        mLayoutRequested = true;
+        mMeasureValid = false;
     }
 
     // Posting.
@@ -1606,7 +1824,19 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     // Layout direction: left-to-right only.
     public static final int LAYOUT_DIRECTION_LTR = 0;
     public static final int LAYOUT_DIRECTION_RTL = 1;
-    public int getLayoutDirection() { return LAYOUT_DIRECTION_LTR; }
+    public int getLayoutDirection() {
+        if (mLayoutDirection == LAYOUT_DIRECTION_LTR || mLayoutDirection == LAYOUT_DIRECTION_RTL)
+            return mLayoutDirection;
+        if (mLayoutDirection == LAYOUT_DIRECTION_LOCALE)
+            return android.text.TextUtils.getLayoutDirectionFromLocale(getResources().getConfiguration().locale);
+        return mParent != null ? mParent.getLayoutDirection() : LAYOUT_DIRECTION_LTR;
+    }
+
+    public long getDrawingTime() {
+        if (!mAttachedToWindow) return 0;
+        if (mParent != null) return mParent.getDrawingTime();
+        return mTraversalWindow != null ? mTraversalWindow.getDrawingTime() : 0;
+    }
     public boolean isLayoutRtl() { return false; }
 
     public void setBackgroundResource(int resid) {
@@ -1617,6 +1847,11 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     // Attach state, visibility and window callbacks.
 
     private boolean mAttachedToWindow;
+    private Window mTraversalWindow;
+
+    void setTraversalWindow(Window window) {
+        mTraversalWindow = window;
+    }
     private int mWindowAttachCount;
     private java.util.concurrent.CopyOnWriteArrayList<OnAttachStateChangeListener>
             mAttachStateListeners;
@@ -2452,7 +2687,14 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
 
     public void getWindowVisibleDisplayFrame(android.graphics.Rect outRect) {
         final android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-        outRect.set(0, 0, dm.widthPixels, dm.heightPixels);
+        View root = getRootView();
+        WindowInsets insets = getRootWindowInsets();
+        int width = root.getWidth() > 0 ? root.getWidth() : dm.widthPixels;
+        int height = root.getHeight() > 0 ? root.getHeight() : dm.heightPixels;
+        outRect.set(insets == null ? 0 : insets.getSystemWindowInsetLeft(),
+                insets == null ? 0 : insets.getSystemWindowInsetTop(),
+                width - (insets == null ? 0 : insets.getSystemWindowInsetRight()),
+                height - (insets == null ? 0 : insets.getSystemWindowInsetBottom()));
     }
 
     public void getLocationInSurface(int[] location) {
@@ -2501,7 +2743,7 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
         }
     }
 
-    public View inflate(Context context, int resource, ViewGroup root) {
+    public static View inflate(Context context, int resource, ViewGroup root) {
         return LayoutInflater.from(context).inflate(resource, root);
     }
 
@@ -2864,9 +3106,16 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public void onDrawForeground(Canvas canvas) {
+        onDrawScrollBars(canvas);
         if (mForeground != null) {
             mForeground.setBounds(0, 0, getWidth(), getHeight());
-            mForeground.draw(canvas);
+            if ((mScrollX | mScrollY) != 0) {
+                canvas.translate(mScrollX, mScrollY);
+                mForeground.draw(canvas);
+                canvas.translate(-mScrollX, -mScrollY);
+            } else {
+                mForeground.draw(canvas);
+            }
         }
     }
 
@@ -3751,7 +4000,8 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     private CharSequence mAccessibilityPaneTitle;
     private int mTextDirection = TEXT_DIRECTION_INHERIT;
     private int mTextAlignment = TEXT_ALIGNMENT_GRAVITY;
-    private int mLayoutDirection = LAYOUT_DIRECTION_LTR;
+    private int mLayoutDirection = LAYOUT_DIRECTION_INHERIT;
+    private int mResolvedLayoutDirection = -1;
 
     public int getImportantForAccessibility() {
         return mImportantForAccessibility;
@@ -3948,7 +4198,11 @@ public class View implements KeyEvent.Callback, android.graphics.drawable.Drawab
     }
 
     public void setLayoutDirection(int layoutDirection) {
+        if (mLayoutDirection == layoutDirection) return;
         mLayoutDirection = layoutDirection;
+        resolveRtlPropertiesIfNeeded();
+        requestLayout();
+        invalidate();
     }
 
     public int getRawLayoutDirection() {

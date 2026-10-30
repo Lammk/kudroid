@@ -50,6 +50,23 @@ bool framework_resource_scalar(uint32_t id, uint8_t* type, uint32_t* data) {
     return true;
 }
 
+bool framework_resource_style(uint32_t id, uint32_t* parent, std::vector<uint32_t>* triples) {
+    if (!framework_resource_is_id(id)) return false;
+    const FrameworkStyleEntry* entry = FindById(kFrameworkStyles, id);
+    if (entry == nullptr) return false;
+    if (parent != nullptr) *parent = entry->parent;
+    if (triples != nullptr) {
+        triples->clear();
+        for (uint32_t i = 0; i < entry->count; ++i) {
+            const FrameworkStyleItem& item = kFrameworkStyleItems[entry->first + i];
+            triples->push_back(item.attr);
+            triples->push_back(item.type);
+            triples->push_back(item.data);
+        }
+    }
+    return true;
+}
+
 bool framework_resource_string(uint32_t id, std::string* text) {
     if (!framework_resource_is_id(id)) return false;
     const FrameworkStringEntry* entry = FindById(kFrameworkStrings, id);

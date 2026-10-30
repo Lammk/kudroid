@@ -4,12 +4,28 @@ import UniformTypeIdentifiers
 import Combine
 
 enum APKFileTypes {
+    static let extensions: Set<String> = ["apk", "apkm", "xapk", "apks"]
+    static func accepts(_ url: URL) -> Bool { url.isFileURL && extensions.contains(url.pathExtension.lowercased()) }
     static var supported: [UTType] {
         ["apk", "xapk", "apks", "apkm"].compactMap { UTType(filenameExtension: $0) } + [.zip, .data]
     }
 }
 
 enum JITActivation {
+    static func openStikDebug(completion: @escaping (Bool) -> Void) {
+        guard let identifier = Bundle.main.bundleIdentifier else { completion(false); return }
+        var url = URLComponents()
+        url.scheme = "stikdebug"
+        url.host = "enable-jit"
+        url.queryItems = [URLQueryItem(name: "bundle-id", value: identifier),
+                          URLQueryItem(name: "pid", value: String(getpid()))]
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 {
+            url.queryItems?.append(URLQueryItem(name: "script-name", value: "universal.js"))
+        }
+        guard let request = url.url else { completion(false); return }
+        UIApplication.shared.open(request, options: [:], completionHandler: completion)
+    }
+
     static func openTrollStore(completion: @escaping (Bool) -> Void) {
         guard let identifier = Bundle.main.bundleIdentifier else { completion(false); return }
         var url = URLComponents()
@@ -214,6 +230,52 @@ final class APKExportModel: ObservableObject {
         }
     }
 
+    func prepareInstalled(_ id: String, displayName: String?) {
+        guard !busy else { return }
+        busy = true; error = nil; output = nil
+        let previous = candidate?.work
+        candidate = nil
+        stage = "Preparing installed app…"
+        worker.async {
+            let fm = FileManager.default
+            let work = fm.temporaryDirectory.appendingPathComponent("Reverse-" + UUID().uuidString)
+            do {
+                if let previous = previous { try? fm.removeItem(at: previous) }
+                let installed = try InstalledAppStorage.directory(id)
+                try fm.createDirectory(at: work, withIntermediateDirectories: true)
+                let guest = work.appendingPathComponent("GuestApp", isDirectory: true)
+                try fm.copyItem(at: installed, to: guest)
+                let info = try JSONSerialization.jsonObject(with: Data(contentsOf: guest.appendingPathComponent("app_info.json"))) as? [String: Any]
+                guard let package = info?["package"] as? String, validPackage(package) else {
+                    throw ExportFailure("The installed app has no valid package ID")
+                }
+                let root = installed.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                let obb = root.appendingPathComponent("sdcard/Android/obb/" + package, isDirectory: true)
+                if fm.fileExists(atPath: obb.path) {
+                    guard obb.resolvingSymlinksInPath().path.hasPrefix(root.path + "/sdcard/Android/obb/") else {
+                        throw ExportFailure("Expansion files point outside app storage")
+                    }
+                    let seed = guest.appendingPathComponent("SeedSdcard/Android/obb/" + package, isDirectory: true)
+                    try fm.createDirectory(at: seed.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if fm.fileExists(atPath: seed.path) { try fm.removeItem(at: seed) }
+                    try fm.copyItem(at: obb, to: seed)
+                }
+                let label = displayName ?? (info?["label"] as? String ?? id)
+                let candidate = ExportCandidate(sourceName: id + ".apk", work: work, guest: guest, package: package,
+                    label: label, version: info?["version"] as? String ?? "1.0",
+                    icon: UIImage(contentsOfFile: guest.appendingPathComponent("app_icon.png").path))
+                DispatchQueue.main.async {
+                    self.candidate = candidate; self.name = label
+                    self.bundleID = package.replacingOccurrences(of: "_", with: "-")
+                    self.stage = "Ready to export"; self.busy = false
+                }
+            } catch {
+                try? fm.removeItem(at: work)
+                DispatchQueue.main.async { self.error = error.localizedDescription; self.busy = false; self.stage = "Could not prepare installed app" }
+            }
+        }
+    }
+
     func export() {
         guard !busy, let candidate = candidate else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -299,6 +361,10 @@ final class APKExportModel: ObservableObject {
         guard var plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as? [String: Any] else {
             throw ExportFailure("Invalid launcher Info.plist")
         }
+        plist.removeValue(forKey: "CFBundleURLTypes")
+        plist.removeValue(forKey: "CFBundleDocumentTypes")
+        plist.removeValue(forKey: "UTImportedTypeDeclarations")
+        plist.removeValue(forKey: "UTExportedTypeDeclarations")
         plist["CFBundleDisplayName"] = title
         plist["CFBundleName"] = title
         plist["CFBundleIdentifier"] = identifier
@@ -348,6 +414,9 @@ struct ReverseView: View {
     @State private var picker = false
     @State private var share = false
     @State private var history = false
+    var installedAppID: String? = nil
+    var installedName: String? = nil
+    @State private var preparedInstalledAPK = false
     var body: some View {
         NavigationView {
             Form {
@@ -385,6 +454,12 @@ struct ReverseView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .onAppear {
+            if !preparedInstalledAPK, let id = installedAppID {
+                preparedInstalledAPK = true
+                model.prepareInstalled(id, displayName: installedName)
+            }
+        }
         .fileImporter(isPresented: $picker, allowedContentTypes: APKFileTypes.supported) { result in
             switch result { case .success(let url): model.prepare(url); case .failure(let error): model.error = error.localizedDescription }
         }
@@ -508,14 +583,7 @@ final class StandaloneBootModel: ObservableObject {
     }
 
     func openDebugger() {
-        guard let bundleID = Bundle.main.bundleIdentifier else { error = "Bundle ID is missing"; return }
-        var url = URLComponents()
-        url.scheme = "stikdebug"
-        url.host = "enable-jit"
-        url.queryItems = [URLQueryItem(name: "bundle-id", value: bundleID), URLQueryItem(name: "pid", value: String(getpid()))]
-        if modernJIT { url.queryItems?.append(URLQueryItem(name: "script-name", value: "universal.js")) }
-        guard let request = url.url else { error = "Could not create StikDebug URL"; return }
-        UIApplication.shared.open(request, options: [:]) { opened in
+        JITActivation.openStikDebug { opened in
             if !opened { self.error = "Could not open StikDebug. Install it and try again." }
         }
     }
@@ -548,7 +616,6 @@ struct StandaloneGuestView: View {
                     .background(Color.black.opacity(0.9)).padding()
             }
         }
-        .preferredColorScheme(.dark)
         .statusBar(hidden: true)
         .onAppear { model.start() }
         .onReceive(timer) { _ in if scenePhase == .active { model.checkJIT() } }

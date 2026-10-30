@@ -20,25 +20,26 @@ public class Resources {
     private final DisplayMetrics mMetrics = new DisplayMetrics();
     private final Configuration mConfiguration = new Configuration();
     private final AssetManager mAssets;
+    private volatile int mConfigurationRevision;
     private final Theme mTheme = new Theme(this);
 
     private static native int nativeGetIdentifier(String name, String type, String packageName);
     private static native String nativeGetResourceName(int id);
-    private static native String nativeGetString(int id, String locale);
-    private static native int nativeGetColor(int id, String locale);
     private static native byte[] nativeReadResource(String path);
 
-    private static native int[] nativeGetStyle(int id, String locale, int uiMode,
-                                               int sdk, int width, int height, int orientation);
+    private static native int[] nativeGetStyle(int id, String locale, Configuration config, int sdk);
     private static native String nativeGetPoolString(int index);
-    private static native boolean nativeGetValue(int id, String locale, TypedValue output, boolean resolve);
+    private static native boolean nativeGetValue(int id, String locale, TypedValue output,
+                                                  boolean resolve, Configuration config, int sdk);
+    private static native int nativeGetDarkMode();
 
     private String localeName() {
         return mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
     }
 
     boolean loadValue(int id, TypedValue output, boolean resolve) {
-        return nativeGetValue(id, localeName(), output, resolve);
+        return nativeGetValue(id, localeName(), output, resolve, mConfiguration,
+                android.os.Build.VERSION.SDK_INT);
     }
 
     public Resources() {
@@ -64,7 +65,13 @@ public class Resources {
             mConfiguration.navigation = Configuration.NAVIGATION_NONAV;
             mConfiguration.navigationHidden = Configuration.NAVIGATIONHIDDEN_YES;
             mConfiguration.screenLayout = Configuration.SCREENLAYOUT_SIZE_NORMAL;
-            mConfiguration.uiMode = Configuration.UI_MODE_TYPE_NORMAL | Configuration.UI_MODE_NIGHT_NO;
+            int nightMode = Configuration.UI_MODE_NIGHT_NO;
+            try {
+                if (nativeGetDarkMode() != 0) {
+                    nightMode = Configuration.UI_MODE_NIGHT_YES;
+                }
+            } catch (Throwable ignored) {}
+            mConfiguration.uiMode = Configuration.UI_MODE_TYPE_NORMAL | nightMode;
             mConfiguration.colorMode = Configuration.COLOR_MODE_WIDE_COLOR_GAMUT_NO | Configuration.COLOR_MODE_HDR_NO;
             deriveConfiguration(mConfiguration, mMetrics);
         }
@@ -74,12 +81,11 @@ public class Resources {
     public Configuration getConfiguration() { return mConfiguration; }
     public AssetManager getAssets() { return mAssets; }
     public String getString(int id) {
-        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
-        String value = nativeGetString(id, locale);
-        if (value == null) {
+        TypedValue value = new TypedValue();
+        if (!loadValue(id, value, true) || value.type != TypedValue.TYPE_STRING || value.string == null) {
             throw new NotFoundException("string resource 0x" + Integer.toHexString(id));
         }
-        return value;
+        return value.string.toString();
     }
     public String getString(int id, Object... formatArgs) {
         String value = getString(id);
@@ -90,9 +96,9 @@ public class Resources {
     public String[] getStringArray(int id) { return new String[0]; }
     public CharSequence getText(int id) { return getString(id); }
     public CharSequence getText(int id, CharSequence def) {
-        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
-        String value = nativeGetString(id, locale);
-        return value != null ? value : def;
+        TypedValue value = new TypedValue();
+        return loadValue(id, value, true) && value.type == TypedValue.TYPE_STRING
+                && value.string != null ? value.string : def;
     }
     public CharSequence[] getTextArray(int id) { return new CharSequence[0]; }
     public int[] getIntArray(int id) { return new int[0]; }
@@ -104,12 +110,38 @@ public class Resources {
             return Integer.parseInt(name);
         } catch (NumberFormatException ignored) {
         }
+        String entry = name;
+        String type = defType;
+        String pkg = defPackage;
+        int colon = entry.indexOf(':');
+        if (colon >= 0) {
+            pkg = entry.substring(0, colon);
+            entry = entry.substring(colon + 1);
+        }
+        int slash = entry.indexOf('/');
+        if (slash >= 0) {
+            type = entry.substring(0, slash);
+            entry = entry.substring(slash + 1);
+        }
+        if ("alertTitle".equals(entry) && ("id".equals(type) || type == null)
+                && ("android".equals(pkg) || pkg == null)) {
+            return 0x01020027;
+        }
+        if ("ok".equals(entry) && ("string".equals(type) || type == null)
+                && ("android".equals(pkg) || pkg == null)) {
+            return 0x0104000a;
+        }
+        if ("cancel".equals(entry) && ("string".equals(type) || type == null)
+                && ("android".equals(pkg) || pkg == null)) {
+            return 0x01040000;
+        }
         return nativeGetIdentifier(name, defType != null ? defType : "",
                 defPackage != null ? defPackage : "");
     }
     public int getColor(int id) {
-        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
-        return nativeGetColor(id, locale);
+        ColorStateList list = getColorStateList(id, null);
+        if (list == null) throw new NotFoundException("color resource 0x" + Integer.toHexString(id));
+        return list.getDefaultColor();
     }
     public int getColor(int id, Theme theme) {
         TypedValue value = new TypedValue();
@@ -180,7 +212,23 @@ public class Resources {
                 valueOf(id, TypedValue.TYPE_FRACTION).data, base, pbase);
     }
     public InputStream openRawResource(int id) { return new ByteArrayInputStream(new byte[0]); }
+    public byte[] readResource(String path) {
+        return nativeReadResource(path);
+    }
+
     public InputStream openRawResource(int id, TypedValue value) {
+        try {
+            if (value == null) {
+                value = new TypedValue();
+                getValue(id, value, true);
+            }
+            if (value.string != null) {
+                byte[] data = nativeReadResource(value.string.toString());
+                if (data != null && data.length > 0) {
+                    return new ByteArrayInputStream(data);
+                }
+            }
+        } catch (Throwable ignored) {}
         return new ByteArrayInputStream(new byte[0]);
     }
     public AssetFileDescriptor openRawResourceFd(int id) { return null; }
@@ -193,19 +241,22 @@ public class Resources {
         if (value.type != TypedValue.TYPE_STRING || value.string == null)
             throw new NotFoundException("Invalid drawable resource 0x" + Integer.toHexString(id));
         String path = value.string.toString();
-        if (!path.endsWith(".xml"))
-            throw new NotFoundException("Unsupported bitmap drawable " + path);
+        if (!path.endsWith(".xml")) {
+            byte[] data = nativeReadResource(path);
+            if (data != null && data.length > 0) {
+                android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length);
+                if (bm != null) {
+                    return new android.graphics.drawable.BitmapDrawable(this, bm);
+                }
+            }
+            android.util.Log.w("Resources", "Undecoded bitmap drawable " + path);
+            return new android.graphics.drawable.BitmapDrawable();
+        }
         XmlResourceParser parser = getXml(id);
         try {
             while (parser.next() != org.xmlpull.v1.XmlPullParser.START_TAG &&
                     parser.getEventType() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {}
-            if ("vector".equals(parser.getName())) {
-                android.graphics.drawable.VectorDrawable drawable =
-                        android.graphics.drawable.VectorDrawable.create(this, parser, theme);
-                android.util.Log.d("Resources", "Loaded vector 0x" + Integer.toHexString(id) + " " + path);
-                return drawable;
-            }
-            throw new NotFoundException("Unsupported drawable element " + parser.getName());
+            return android.graphics.drawable.DrawableInflater.create(this, parser, theme);
         } catch (org.xmlpull.v1.XmlPullParserException | java.io.IOException e) {
             throw new NotFoundException("Invalid drawable XML " + path + ": " + e.getMessage());
         } finally { parser.close(); }
@@ -309,9 +360,7 @@ public class Resources {
             StyleData cached = mStyleCache.get(id);
             if (cached != null) return cached;
         }
-        int[] data = nativeGetStyle(id, localeName(), mConfiguration.uiMode,
-                android.os.Build.VERSION.SDK_INT, mConfiguration.screenWidthDp,
-                mConfiguration.screenHeightDp, mConfiguration.orientation);
+        int[] data = nativeGetStyle(id, localeName(), mConfiguration, android.os.Build.VERSION.SDK_INT);
         if (data == null) return null;
         StyleData built = new StyleData(data);
         synchronized (mStyleCache) { mStyleCache.put(id, built); }
@@ -439,6 +488,7 @@ public class Resources {
         if (config != null) mConfiguration.setTo(config);
         else if (metrics != null) deriveConfiguration(mConfiguration, mMetrics);
         synchronized (mStyleCache) { mStyleCache.clear(); }
+        mConfigurationRevision++;
     }
 
     private static void deriveConfiguration(Configuration out, DisplayMetrics metrics) {
@@ -452,6 +502,19 @@ public class Resources {
         out.smallestScreenWidthDp = Math.min(widthDp, heightDp);
         out.orientation = widthDp > heightDp
                 ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
+        int longDp = Math.max(widthDp, heightDp), shortDp = Math.min(widthDp, heightDp);
+        int size = longDp < 470 ? Configuration.SCREENLAYOUT_SIZE_SMALL
+                : longDp >= 960 && shortDp >= 720 ? Configuration.SCREENLAYOUT_SIZE_XLARGE
+                : longDp >= 640 && shortDp >= 480 ? Configuration.SCREENLAYOUT_SIZE_LARGE
+                : Configuration.SCREENLAYOUT_SIZE_NORMAL;
+        int longMode = longDp >= 470 && longDp * 3 / 5 >= shortDp - 1
+                ? Configuration.SCREENLAYOUT_LONG_YES : Configuration.SCREENLAYOUT_LONG_NO;
+        int direction = android.text.TextUtils.getLayoutDirectionFromLocale(out.locale) == 1
+                ? Configuration.SCREENLAYOUT_LAYOUTDIR_RTL : Configuration.SCREENLAYOUT_LAYOUTDIR_LTR;
+        out.screenLayout = (out.screenLayout & ~(Configuration.SCREENLAYOUT_SIZE_MASK
+                | Configuration.SCREENLAYOUT_LONG_MASK | Configuration.SCREENLAYOUT_LAYOUTDIR_MASK
+                | Configuration.SCREENLAYOUT_ROUND_MASK)) | size | longMode | direction
+                | Configuration.SCREENLAYOUT_ROUND_NO;
     }
 
     public final void flushLayoutCache() {}
@@ -459,6 +522,9 @@ public class Resources {
     public static final class Theme {
         private final Resources mResources;
         private final java.util.HashMap<Integer, TypedValue> attributes = new java.util.HashMap<>();
+        private final java.util.ArrayList<Integer> appliedStyles = new java.util.ArrayList<>();
+        private final java.util.ArrayList<Boolean> appliedForces = new java.util.ArrayList<>();
+        private int configurationRevision;
 
         Theme() { this(null); }
         Theme(Resources resources) { mResources = resources; }
@@ -487,6 +553,8 @@ public class Resources {
                     if (getResources().loadValue(value.data, resolved, true)) {
                         value.setTo(resolved);
                         if (value.type == TypedValue.TYPE_ATTRIBUTE) continue;
+                    } else {
+                        value.resourceId = value.data;
                     }
                 }
                 return value;
@@ -495,6 +563,7 @@ public class Resources {
         }
 
         public synchronized boolean resolveAttribute(int id, TypedValue output, boolean resolveRefs) {
+            ensureCurrentConfiguration();
             if (output == null) throw new NullPointerException();
             TypedValue value = resolveValue(attributes.get(id), resolveRefs);
             if (value == null) { output.setTo(new TypedValue()); return false; }
@@ -504,6 +573,7 @@ public class Resources {
 
         /** The theme's own value for `attr`, with ?attr chains followed; null when unset. */
         synchronized TypedValue lookupAttribute(int attr) {
+            ensureCurrentConfiguration();
             TypedValue value = attributes.get(attr);
             for (int depth = 0; value != null && value.type == TypedValue.TYPE_ATTRIBUTE; depth++) {
                 if (depth >= 32) return null;
@@ -528,11 +598,19 @@ public class Resources {
         }
 
         public synchronized void applyStyle(int id, boolean force) {
+            ensureCurrentConfiguration();
+            if (applyStyleValues(id, force)) {
+                appliedStyles.add(id);
+                appliedForces.add(force);
+            }
+        }
+
+        private boolean applyStyleValues(int id, boolean force) {
             Resources resources = getResources();
             StyleData style = resources.styleData(id);
             if (style == null) {
                 android.util.Log.w("Resources", "Missing style 0x" + Integer.toHexString(id));
-                return;
+                return false;
             }
             int[] data = style.data;
             for (int i = 0; i + 2 < data.length; i += 3) {
@@ -542,23 +620,47 @@ public class Resources {
                 resources.styleValue(style, data[i], value);
                 attributes.put(data[i], value);
             }
+            return true;
+        }
+
+        private void ensureCurrentConfiguration() {
+            int revision = getResources().mConfigurationRevision;
+            if (configurationRevision == revision) return;
+            attributes.clear();
+            for (int i = 0; i < appliedStyles.size(); i++) {
+                applyStyleValues(appliedStyles.get(i), appliedForces.get(i));
+            }
+            configurationRevision = revision;
         }
 
         public void setTo(Theme other) {
             if (other == null) throw new NullPointerException();
             if (other == this) return;
             java.util.HashMap<Integer, TypedValue> copy = new java.util.HashMap<>();
+            java.util.ArrayList<Integer> styles;
+            java.util.ArrayList<Boolean> forces;
             synchronized (other) {
+                other.ensureCurrentConfiguration();
+                styles = new java.util.ArrayList<>(other.appliedStyles);
+                forces = new java.util.ArrayList<>(other.appliedForces);
                 for (java.util.Map.Entry<Integer, TypedValue> entry : other.attributes.entrySet()) {
                     TypedValue value = new TypedValue(); value.setTo(entry.getValue());
                     copy.put(entry.getKey(), value);
                 }
             }
-            synchronized (this) { attributes.clear(); attributes.putAll(copy); }
+            synchronized (this) {
+                attributes.clear(); attributes.putAll(copy);
+                appliedStyles.clear(); appliedStyles.addAll(styles);
+                appliedForces.clear(); appliedForces.addAll(forces);
+                configurationRevision = getResources().mConfigurationRevision;
+            }
         }
         public int getChangingConfigurations() { return 0; }
         public void dump(int priority, String tag, String prefix) {}
-        public void rebase() {}
+        public synchronized void rebase() {
+            configurationRevision = getResources().mConfigurationRevision - 1;
+            ensureCurrentConfiguration();
+        }
         public String toString() { return "Resources$Theme{attributes=" + attributes.size() + "}"; }
     }
 

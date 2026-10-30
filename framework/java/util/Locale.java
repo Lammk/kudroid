@@ -59,13 +59,22 @@ public final class Locale {
     private Locale(String language, String script, String country, String variant) {
         this.language = language == null ? "" : normalizeLanguage(language);
         this.script = script == null ? "" : script;
-        this.country = country == null ? "" : country.toUpperCase();
+        this.country = country == null ? "" : asciiCase(country, true);
         this.variant = variant == null ? "" : variant;
+    }
+
+    private static String asciiCase(String value, boolean upper) {
+        char[] chars = value.toCharArray();
+        for (int i = 0; i < chars.length; i++) {
+            if (upper && chars[i] >= 'a' && chars[i] <= 'z') chars[i] -= 32;
+            else if (!upper && chars[i] >= 'A' && chars[i] <= 'Z') chars[i] += 32;
+        }
+        return new String(chars);
     }
 
     // Legacy ISO codes map to their current form, as the platform does.
     private static String normalizeLanguage(String language) {
-        final String lower = language.toLowerCase();
+        final String lower = asciiCase(language, false);
         switch (lower) {
             case "iw": return "he";
             case "in": return "id";

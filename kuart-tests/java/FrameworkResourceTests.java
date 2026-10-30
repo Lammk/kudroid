@@ -8,6 +8,7 @@ public final class FrameworkResourceTests {
         try { identifiers(); } catch (Throwable t) { TestSupport.fail("identifiers", t); }
         try { names(); } catch (Throwable t) { TestSupport.fail("names", t); }
         try { typed(); } catch (Throwable t) { TestSupport.fail("typed", t); }
+        try { styles(); } catch (Throwable t) { TestSupport.fail("styles", t); }
         return TestSupport.report.toString();
     }
 
@@ -91,5 +92,33 @@ public final class FrameworkResourceTests {
         } catch (android.content.res.Resources.NotFoundException expected) {
             check(true, "getDimension on a color throws NotFoundException");
         }
+    }
+
+    // Framework themes resolve through the built-in style table.
+    static void styles() {
+        final int themeMaterial = 0x01030224;
+        final int attrTextAppearance = 0x01010034;
+        final int attrColorBackground = 0x01010031;
+        android.content.res.Resources r = new android.content.res.Resources();
+        android.content.res.Resources.Theme theme = r.newTheme();
+        theme.applyStyle(themeMaterial, true);
+        android.util.TypedValue v = new android.util.TypedValue();
+        check(theme.resolveAttribute(attrTextAppearance, v, false)
+                && v.type == android.util.TypedValue.TYPE_REFERENCE && v.data != 0,
+                "Theme.Material inherits android:textAppearance from Theme");
+        check(theme.resolveAttribute(attrColorBackground, v, true)
+                && v.type >= android.util.TypedValue.TYPE_FIRST_COLOR_INT
+                && v.type <= android.util.TypedValue.TYPE_LAST_COLOR_INT,
+                "android:colorBackground resolves to a color");
+        android.content.res.TypedArray a = theme.obtainStyledAttributes(
+                new int[] { attrTextAppearance });
+        check(a.getResourceId(0, -1) != -1, "getResourceId answers for a style reference");
+        a.recycle();
+
+        // textColorSecondary is a private file-backed color in Theme.Material; it must hide
+        // the parent's public one instead of letting it show through.
+        final int attrTextColorSecondary = 0x01010038;
+        check(!theme.resolveAttribute(attrTextColorSecondary, v, true),
+                "an item the table cannot hold masks the parent's value");
     }
 }

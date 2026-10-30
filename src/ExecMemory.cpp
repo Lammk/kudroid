@@ -45,6 +45,7 @@ constexpr size_t kProbeSize = 4096;
 // Virtual reservation for the prepared exec arena. Only touched pages commit, so
 // the size covers every guest exec prefix plus JIT code at no resident cost.
 constexpr size_t kArenaSize = 256ull << 20;
+constexpr size_t kGuestArenaSize = 64ull << 20;
 
 // Defined below, used by the arena helpers above them.
 size_t PageSize();
@@ -244,7 +245,7 @@ struct PreparedArena {
     void* backing = nullptr;  // RW view
     void* alias = nullptr;    // RX view, prepared
     size_t size = 0;
-    size_t used = 0;
+    std::atomic<size_t> used{0};
     bool active = false;
 };
 
@@ -254,15 +255,63 @@ PreparedArena& ArenaState() {
     return arena;
 }
 
+struct GuestArena {
+    void* write = nullptr;
+    void* address = nullptr;
+    size_t size = 0;
+    std::atomic<size_t> used{0};
+    std::atomic<bool> active{false};
+};
+
+GuestArena& GuestArenaState() {
+    static GuestArena arena;
+    return arena;
+}
+
+struct GuestTransitionRecord {
+    const char* phase = "before-detach";
+    int prot = -1;
+    int result = 0;
+    int error = 0;
+    vm_prot_t beforeCurrent = 0;
+    vm_prot_t beforeMaximum = 0;
+    vm_prot_t current = 0;
+    vm_prot_t maximum = 0;
+    bool valid = false;
+};
+
+struct GuestProbeStatus : GuestTransitionRecord {
+    const char* stage = "not-probed";
+    GuestTransitionRecord transitions[8]{};
+    size_t transitionCount = 0;
+};
+
+GuestProbeStatus& LastGuestProbe() {
+    static GuestProbeStatus status;
+    return status;
+}
+
+bool ClaimArenaBytes(std::atomic<size_t>& used, size_t capacity, size_t size,
+                     size_t* offset) {
+    size_t current = used.load(std::memory_order_relaxed);
+    do {
+        if (current > capacity || size > capacity - current) return false;
+    } while (!used.compare_exchange_weak(current, current + size,
+                                         std::memory_order_relaxed));
+    *offset = current;
+    return true;
+}
+
 bool ArenaCarve(size_t size, void** outWrite, void** outExec, size_t* outSize) {
     PreparedArena& a = ArenaState();
     if (!a.active) return false;
+    if (size == 0 || size > SIZE_MAX - (PageSize() - 1)) return false;
     const size_t rounded = RoundUp(size, PageSize());
-    if (a.used + rounded > a.size) return false;
-    *outWrite = static_cast<char*>(a.backing) + a.used;
-    *outExec = static_cast<char*>(a.alias) + a.used;
+    size_t offset = 0;
+    if (!ClaimArenaBytes(a.used, a.size, rounded, &offset)) return false;
+    *outWrite = static_cast<char*>(a.backing) + offset;
+    *outExec = static_cast<char*>(a.alias) + offset;
     *outSize = rounded;
-    a.used += rounded;
     return true;
 }
 
@@ -436,6 +485,42 @@ void PrintProt(const char* what, const void* addr) {
     return RegionProt(addr, nullptr, &max) && (max & VM_PROT_EXECUTE) != 0;
 }
 
+void PrintGuestTransition(const GuestTransitionRecord& record) {
+    std::fprintf(stderr,
+                 "[KuDroidExecMem] guest transition phase=%s prot=0x%x ret=%d errno=%d before_cur=0x%x before_max=0x%x cur=0x%x max=0x%x valid=%d\n",
+                 record.phase, record.prot, record.result, record.error,
+                 record.beforeCurrent, record.beforeMaximum,
+                 record.current, record.maximum, record.valid ? 1 : 0);
+}
+
+bool GuestTransition(void* address, int prot, const char* phase = "before-detach") {
+    GuestTransitionRecord record;
+    record.phase = phase;
+    record.prot = prot;
+    const bool queriedBefore = RegionProt(address, &record.beforeCurrent,
+                                         &record.beforeMaximum);
+    vm_prot_t current = 0, maximum = 0;
+    const int result = ::mprotect(address, PageSize(), prot);
+    const int failure = result == 0 ? 0 : errno;
+    const bool queried = RegionProt(address, &current, &maximum);
+    record.result = result;
+    record.error = failure;
+    record.current = current;
+    record.maximum = maximum;
+    // Every step must retain the capability for the next RW/RX transition.
+    record.valid = result == 0 && queriedBefore && queried &&
+                   (current & VM_PROT_ALL) == prot &&
+                   (record.beforeMaximum & VM_PROT_ALL) == VM_PROT_ALL &&
+                   (maximum & VM_PROT_ALL) == VM_PROT_ALL;
+    GuestProbeStatus& status = LastGuestProbe();
+    static_cast<GuestTransitionRecord&>(status) = record;
+    if (status.transitionCount < sizeof(status.transitions) / sizeof(status.transitions[0])) {
+        status.transitions[status.transitionCount++] = record;
+    }
+    PrintGuestTransition(record);
+    return record.valid;
+}
+
 // One-shot survey of what this device lets us allocate, executing nothing. The
 // result decides how the loader maps guest code under TXM. Self-checks the region
 // layout against our own executable text first, so bogus numbers are never read
@@ -504,6 +589,9 @@ bool CreatePreparedArena(size_t size) {
     PreparedArena& a = ArenaState();
     if (a.active) return true;
     if (!(TxmEstimate() && CsDebugged())) return false;
+    GuestProbeStatus& status = LastGuestProbe();
+    status = GuestProbeStatus{};
+    status.stage = "server-allocation";
 
     // Let the debug script allocate the executable region. An engine-created
     // mapping — even one prepared over the connection — is still refused at fetch
@@ -518,6 +606,7 @@ bool CreatePreparedArena(size_t size) {
     }
     PrintProt("arena exec (server rx)", rx);
 
+    status.stage = "write-alias";
     void* rw = nullptr;
     if (!RemapWritable(rx, size, &rw)) {
         std::fprintf(stderr, "[KuDroidExecMem] arena: rw alias of exec region failed\n");
@@ -525,15 +614,89 @@ bool CreatePreparedArena(size_t size) {
         return false;
     }
     PrintProt("arena write alias", rw);
+    status.stage = "mapping-permissions";
+    vm_prot_t writeCurrent = 0, writeMaximum = 0;
+    vm_prot_t execCurrent = 0, execMaximum = 0;
+    const vm_prot_t rwProt = VM_PROT_READ | VM_PROT_WRITE;
+    const vm_prot_t rxProt = VM_PROT_READ | VM_PROT_EXECUTE;
+    if (!RegionProt(rw, &writeCurrent, &writeMaximum) ||
+        !RegionProt(rx, &execCurrent, &execMaximum) ||
+        (writeCurrent & rwProt) != rwProt || (writeMaximum & rwProt) != rwProt ||
+        (execCurrent & rxProt) != rxProt || (execMaximum & rxProt) != rxProt) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: required permissions unavailable\n");
+        DetachJitScript();
+        ::munmap(rw, size);
+        ::munmap(rx, size);
+        return false;
+    }
+
+    // Validate transitions on an unused page before exposing guest addresses.
+    const size_t guestSize = size > kGuestArenaSize ? kGuestArenaSize : 0;
+    void* guestAddress = static_cast<char*>(rx) + size - guestSize;
+    void* probeAddress = static_cast<char*>(rx) + size - PageSize();
+    auto* probeWrite = reinterpret_cast<volatile uint32_t*>(
+        static_cast<char*>(rw) + size - PageSize());
+    bool stable = guestSize != 0;
+    status.stage = "protection-transition";
+    const int transitions[] = {PROT_NONE, PROT_READ | PROT_WRITE,
+                               PROT_READ | PROT_EXEC, PROT_READ | PROT_WRITE,
+                               PROT_READ | PROT_EXEC};
+    for (int prot : transitions) {
+        if (!stable || !GuestTransition(probeAddress, prot)) {
+            stable = false;
+            break;
+        }
+        if (prot & PROT_WRITE) {
+            auto* guestWrite = reinterpret_cast<volatile uint32_t*>(probeAddress);
+            *guestWrite = 0x13579bdfu;
+            if (*probeWrite != 0x13579bdfu) {
+                status.stage = "write-sharing";
+                stable = false;
+                break;
+            }
+            *probeWrite = 0x2468ace0u;
+            if (*guestWrite != 0x2468ace0u) {
+                status.stage = "write-sharing";
+                stable = false;
+                break;
+            }
+        } else if ((prot & PROT_EXEC) &&
+                   *reinterpret_cast<volatile uint32_t*>(probeAddress) != 0x2468ace0u) {
+            stable = false;
+            status.stage = "write-sharing";
+            break;
+        }
+    }
 
     // The region set is final: nothing executable is created after this point.
     DetachJitScript();
 
+    if (stable) {
+        status.stage = "post-detach-transition";
+        stable = GuestTransition(probeAddress, PROT_READ | PROT_WRITE, "after-detach") &&
+                 GuestTransition(probeAddress, PROT_READ | PROT_EXEC, "after-detach");
+    }
+    const bool protectGuestPool = stable;
+    if (stable && ::mprotect(guestAddress, guestSize, PROT_NONE) != 0) {
+        status.stage = "pool-protection";
+        stable = false;
+    }
+
     a.backing = rw;   // writes go here
     a.alias = rx;     // fetches go here
-    a.size = size;
+    a.size = size - (protectGuestPool ? guestSize : PageSize());
     a.used = 0;
     a.active = true;
+    if (stable) {
+        status.stage = "ready";
+        GuestArena& guest = GuestArenaState();
+        guest.write = static_cast<char*>(rw) + a.size;
+        guest.address = guestAddress;
+        guest.size = guestSize;
+        guest.active.store(true, std::memory_order_release);
+    }
+    std::fprintf(stderr, "[KuDroidExecMem] guest same-address arena=%s size=%zu MiB\n",
+                 stable ? "ready" : "unsupported", stable ? guestSize >> 20 : 0);
     std::fprintf(stderr,
                  "[KuDroidExecMem] prepared arena %zu MiB ready (server rx + rw alias)\n",
                  size >> 20);
@@ -782,6 +945,25 @@ const char* ExecMemory::RuntimeSummary() {
     return RuntimeSummaryInner();
 }
 
+void ExecMemory::LogState() {
+    const ProbeState& state = ProbeStateInstance();
+    std::lock_guard<std::recursive_mutex> lock(ProbeMutex());
+    std::fprintf(stderr, "[KuDroidExecMem] run state mode=%s fetchable=%d guest_pool=%d %s\n",
+                 ModeName(), state.fetchable.load(std::memory_order_acquire) ? 1 : 0,
+                 GuestReservationsAvailable() ? 1 : 0, RuntimeSummaryInner());
+#if defined(__APPLE__)
+    const GuestProbeStatus& status = LastGuestProbe();
+    std::fprintf(stderr,
+                 "[KuDroidExecMem] guest capability stage=%s prot=0x%x ret=%d errno=%d before_cur=0x%x before_max=0x%x cur=0x%x max=0x%x\n",
+                 status.stage, status.prot, status.result, status.error,
+                 status.beforeCurrent, status.beforeMaximum,
+                 status.current, status.maximum);
+    for (size_t i = 0; i < status.transitionCount; ++i) {
+        PrintGuestTransition(status.transitions[i]);
+    }
+#endif
+}
+
 bool ExecMemory::TxmScriptReady() {
 #if defined(__APPLE__)
     return TxmEstimate() && CsDebugged();
@@ -866,6 +1048,70 @@ void ExecMemory::Free(const Region& region) {
         munmap(region.execView, region.size);
     }
     munmap(region.writeView, region.size);
+}
+
+bool ExecMemory::GuestReservationsAvailable() {
+#if defined(__APPLE__)
+    return GuestArenaState().active.load(std::memory_order_acquire);
+#else
+    return false;
+#endif
+}
+
+void* ExecMemory::GuestWritePointer(void* addr, size_t size) {
+#if defined(__APPLE__)
+    const GuestArena& a = GuestArenaState();
+    if (!a.active.load(std::memory_order_acquire) || size == 0) return nullptr;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(a.address);
+    const uintptr_t p = reinterpret_cast<uintptr_t>(addr);
+    const size_t used = a.used.load(std::memory_order_relaxed);
+    if (p < base || p - base >= used || size > used - (p - base)) return nullptr;
+    return static_cast<char*>(a.write) + (p - base);
+#else
+    (void)addr;
+    (void)size;
+    return nullptr;
+#endif
+}
+
+bool ExecMemory::GuestMemoryOverlaps(const void* addr, size_t size) {
+#if defined(__APPLE__)
+    const GuestArena& a = GuestArenaState();
+    if (!a.active.load(std::memory_order_acquire) || size == 0) return false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(a.address);
+    const uintptr_t p = reinterpret_cast<uintptr_t>(addr);
+    return p >= base ? p - base < a.size : size > base - p;
+#else
+    (void)addr;
+    (void)size;
+    return false;
+#endif
+}
+
+void* ExecMemory::AllocateGuest(size_t size, int prot) {
+#if defined(__APPLE__)
+    GuestArena& a = GuestArenaState();
+    if (!a.active.load(std::memory_order_acquire)) { errno = ENOTSUP; return MAP_FAILED; }
+    if (size == 0 || size > SIZE_MAX - (PageSize() - 1)) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    const size_t rounded = RoundUp(size, PageSize());
+    size_t offset = 0;
+    if (!ClaimArenaBytes(a.used, a.size, rounded, &offset)) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    void* address = static_cast<char*>(a.address) + offset;
+    std::memset(static_cast<char*>(a.write) + offset, 0, rounded);
+    if (::mprotect(address, rounded, prot) != 0) return MAP_FAILED;
+    return address;
+#else
+    (void)size;
+    (void)prot;
+    errno = ENOTSUP;
+    return MAP_FAILED;
+#endif
 }
 
 size_t ExecMemory::PageSize() {

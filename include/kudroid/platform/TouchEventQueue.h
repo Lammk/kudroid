@@ -5,6 +5,7 @@
 #include <deque>
 #include <mutex>
 #include <vector>
+#include "kudroid/platform/GuestClock.h"
 
 namespace kudroid {
 
@@ -16,6 +17,7 @@ class TouchEventQueue {
 public:
     struct Event {
         int action = 0;
+        int64_t eventTimeMillis = 0;
         float x = 0;
         float y = 0;
         // Fingers down including this event's own pointer. Native input code indexes
@@ -63,9 +65,10 @@ public:
     // pointer index). A table shorter than pointerCount is ignored in favour of the
     // single-position form: a malformed producer must not invent pointers.
     void push(int action, float x, float y, int pointerCount, const int* ids, const float* xs,
-              const float* ys) {
+              const float* ys, int64_t arrivalMillis = -1) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!accepting_) return;
+        const int64_t eventTimeMillis = arrivalMillis >= 0 ? arrivalMillis : guest_monotonic_ns() / 1000000ll;
         if (pointerCount < 1) pointerCount = 1;
         const bool haveTable = ids != nullptr && xs != nullptr && ys != nullptr;
         // Coalesce the flood at ingress: a drag produces 60-120 MOVEs/s and each
@@ -87,6 +90,7 @@ public:
         if ((action & 0xff) == 2 && !events_.empty() &&
             (events_.back().action & 0xff) == 2 && samePointers) {
             Event& back = events_.back();
+            back.eventTimeMillis = eventTimeMillis;
             if (haveTable) {
                 back.pointerIds.resize(static_cast<size_t>(pointerCount));
                 back.pointerXs.resize(static_cast<size_t>(pointerCount));
@@ -127,6 +131,7 @@ public:
         // entry, doubling the per-event heap traffic for nothing.
         Event ev;
         ev.action = action;
+        ev.eventTimeMillis = eventTimeMillis;
         ev.pointerCount = pointerCount;
         const size_t slots = static_cast<size_t>(pointerCount);
         if (haveTable) {

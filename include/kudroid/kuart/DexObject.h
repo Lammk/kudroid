@@ -22,8 +22,7 @@ public:
     uint32_t lock_owner_tid = 0;
     uint32_t lock_count = 0;
 
-    // Bumped by notify/notifyAll so a waiter can tell a real notification
-    // from a spurious condition-variable wakeup.
+    // Notification sequence for monitor diagnostics.
     uint32_t notify_seq = 0;
 
     uint8_t* FieldData() { return reinterpret_cast<uint8_t*>(this) + sizeof(DexObject); }

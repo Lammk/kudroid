@@ -16,331 +16,269 @@
 
 package java.math;
 
+import java.util.Arrays;
 
-import libcore.util.NativeAllocationRegistry;
-
-/*
- * In contrast to BigIntegers this class doesn't fake two's complement representation.
- * Any Bit-Operations, including Shifting, solely regard the unsigned magnitude.
- * Moreover BigInt objects are mutable and offer efficient in-place-operations.
- */
+/** Mutable signed magnitude arithmetic without native allocations. */
 final class BigInt {
+    private int[] words;
+    private int sign;
+    private static final long MASK = 0xffffffffL;
 
-    private static NativeAllocationRegistry registry = NativeAllocationRegistry.createMalloced(
-            BigInt.class.getClassLoader(), NativeBN.getNativeFinalizer());
-
-    /* Fields used for the internal representation. */
-    
-    private transient long bignum = 0;
-
-    @Override
-    public String toString() {
-        return this.decString();
+    boolean hasNativeBignum() { return words != null; }
+    private void set(int[] value, int polarity) {
+        int length = value.length;
+        while (length > 1 && value[length - 1] == 0) length--;
+        words = length == 0 ? new int[] {0} : Arrays.copyOf(value, length);
+        sign = words.length == 1 && words[0] == 0 ? 0 : polarity < 0 ? -1 : 1;
     }
-
-    boolean hasNativeBignum() {
-        return this.bignum != 0;
+    private static BigInt of(int[] value, int polarity) {
+        BigInt result = new BigInt(); result.set(value, polarity); return result;
     }
-
-    private void makeValid() {
-        if (this.bignum == 0) {
-            this.bignum = NativeBN.BN_new();
-            registry.registerNativeAllocation(this, this.bignum);
+    private static BigInt small(long value) { BigInt result = new BigInt(); result.putLongInt(value); return result; }
+    void putCopy(BigInt value) { set(value.words, value.sign); }
+    BigInt copy() { return of(words, sign); }
+    void putLongInt(long value) { putULongInt(value < 0 ? -value : value, value < 0); }
+    void putULongInt(long value, boolean negative) { set(new int[] {(int) value, (int) (value >>> 32)}, negative ? -1 : 1); }
+    String checkString(String text, int radix) {
+        if (text == null) throw new NullPointerException();
+        if (text.length() == 0) throw new NumberFormatException("Empty integer");
+        StringBuffer ascii = new StringBuffer();
+        int start = text.charAt(0) == '+' || text.charAt(0) == '-' ? 1 : 0;
+        if (start == text.length()) throw new NumberFormatException("Missing integer digits");
+        if (text.charAt(0) == '-') ascii.append('-');
+        for (int i = start; i < text.length(); i++) {
+            int digit = Character.digit(text.charAt(i), radix);
+            if (digit < 0) throw new NumberFormatException("Invalid integer digit");
+            ascii.append(Character.forDigit(digit, radix));
         }
+        return ascii.toString();
     }
-
-    private static BigInt newBigInt() {
-        BigInt bi = new BigInt();
-        bi.bignum = NativeBN.BN_new();
-        registry.registerNativeAllocation(bi, bi.bignum);
-        return bi;
-    }
-
-
-    static int cmp(BigInt a, BigInt b) {
-        return NativeBN.BN_cmp(a.bignum, b.bignum);
-    }
-
-
-    void putCopy(BigInt from) {
-        this.makeValid();
-        NativeBN.BN_copy(this.bignum, from.bignum);
-    }
-
-    BigInt copy() {
-        BigInt bi = new BigInt();
-        bi.putCopy(this);
-        return bi;
-    }
-
-
-    void putLongInt(long val) {
-        this.makeValid();
-        NativeBN.putLongInt(this.bignum, val);
-    }
-
-    void putULongInt(long val, boolean neg) {
-        this.makeValid();
-        NativeBN.putULongInt(this.bignum, val, neg);
-    }
-
-    private NumberFormatException invalidBigInteger(String s) {
-        throw new NumberFormatException("Invalid BigInteger: " + s);
-    }
-
-    void putDecString(String original) {
-        String s = checkString(original, 10);
-        this.makeValid();
-        int usedLen = NativeBN.BN_dec2bn(this.bignum, s);
-        if (usedLen < s.length()) {
-            throw invalidBigInteger(original);
+    private void putString(String text, int radix) {
+        String ascii = checkString(text, radix);
+        boolean negative = ascii.charAt(0) == '-';
+        putLongInt(0);
+        for (int i = negative ? 1 : 0; i < ascii.length(); i++) {
+            multiplyByPositiveInt(radix); addPositiveInt(Character.digit(ascii.charAt(i), radix));
         }
+        if (negative) setSign(-1);
     }
-
-    void putHexString(String original) {
-        String s = checkString(original, 16);
-        this.makeValid();
-        int usedLen = NativeBN.BN_hex2bn(this.bignum, s);
-        if (usedLen < s.length()) {
-            throw invalidBigInteger(original);
+    void putDecString(String text) { putString(text, 10); }
+    void putHexString(String text) { putString(text, 16); }
+    void putBigEndian(byte[] bytes, boolean negative) {
+        int[] value = new int[(bytes.length + 3) / 4];
+        for (int i = 0; i < bytes.length; i++) value[i / 4] |= (bytes[bytes.length - 1 - i] & 255) << (i % 4 * 8);
+        set(value, negative ? -1 : 1);
+    }
+    void putLittleEndianInts(int[] value, boolean negative) { set(value, negative ? -1 : 1); }
+    void putBigEndianTwosComplement(byte[] bytes) {
+        if (bytes.length == 0) throw new NumberFormatException("Empty integer");
+        if (bytes[0] >= 0) { putBigEndian(bytes, false); return; }
+        byte[] magnitude = new byte[bytes.length]; int carry = 1;
+        for (int i = bytes.length - 1; i >= 0; i--) {
+            int value = (bytes[i] ^ 255) & 255; value += carry;
+            magnitude[i] = (byte) value; carry = value >>> 8;
         }
+        putBigEndian(magnitude, true);
     }
-
-    /**
-     * Returns a string suitable for passing to OpenSSL.
-     * Throws if 's' doesn't match Java's rules for valid BigInteger strings.
-     * BN_dec2bn and BN_hex2bn do very little checking, so we need to manually
-     * ensure we comply with Java's rules.
-     * http://code.google.com/p/android/issues/detail?id=7036
-     */
-    String checkString(String s, int base) {
-        if (s == null) {
-            throw new NullPointerException("s == null");
-        }
-        // A valid big integer consists of an optional '-' or '+' followed by
-        // one or more digit characters appropriate to the given base,
-        // and no other characters.
-        int charCount = s.length();
-        int i = 0;
-        if (charCount > 0) {
-            char ch = s.charAt(0);
-            if (ch == '+') {
-                // Java supports leading +, but OpenSSL doesn't, so we need to strip it.
-                s = s.substring(1);
-                --charCount;
-            } else if (ch == '-') {
-                ++i;
-            }
-        }
-        if (charCount - i == 0) {
-            throw invalidBigInteger(s);
-        }
-        boolean nonAscii = false;
-        for (; i < charCount; ++i) {
-            char ch = s.charAt(i);
-            if (Character.digit(ch, base) == -1) {
-                throw invalidBigInteger(s);
-            }
-            if (ch > 128) {
-                nonAscii = true;
-            }
-        }
-        return nonAscii ? toAscii(s, base) : s;
-    }
-
-    // Java supports non-ASCII decimal digits, but OpenSSL doesn't.
-    // We need to translate the decimal digits but leave any other characters alone.
-    // This method assumes it's being called on a string that has already been validated.
-    private static String toAscii(String s, int base) {
-        int length = s.length();
-        StringBuilder result = new StringBuilder(length);
-        for (int i = 0; i < length; ++i) {
-            char ch = s.charAt(i);
-            int value = Character.digit(ch, base);
-            if (value >= 0 && value <= 9) {
-                ch = (char) ('0' + value);
-            }
-            result.append(ch);
-        }
-        return result.toString();
-    }
-
-    void putBigEndian(byte[] a, boolean neg) {
-        this.makeValid();
-        NativeBN.BN_bin2bn(a, a.length, neg, this.bignum);
-    }
-
-    void putLittleEndianInts(int[] a, boolean neg) {
-        this.makeValid();
-        NativeBN.litEndInts2bn(a, a.length, neg, this.bignum);
-    }
-
-    void putBigEndianTwosComplement(byte[] a) {
-        this.makeValid();
-        NativeBN.twosComp2bn(a, a.length, this.bignum);
-    }
-
-
     long longInt() {
-        return NativeBN.longInt(this.bignum);
+        long value = words[0] & MASK;
+        if (words.length > 1) value |= (long) words[1] << 32;
+        return sign < 0 ? -value : value;
     }
-
-    String decString() {
-        return NativeBN.BN_bn2dec(this.bignum);
+    private String radixString(int radix) {
+        if (sign == 0) return "0";
+        BigInt remaining = copy(); remaining.sign = 1;
+        StringBuffer reversed = new StringBuffer();
+        BigInt divisor = small(radix);
+        while (remaining.sign != 0) {
+            BigInt quotient = new BigInt(), remainder = new BigInt();
+            division(remaining, divisor, quotient, remainder);
+            reversed.append(Character.forDigit((int) remainder.longInt(), radix)); remaining = quotient;
+        }
+        if (sign < 0) reversed.append('-');
+        return reversed.reverse().toString();
     }
-
-    String hexString() {
-        return NativeBN.BN_bn2hex(this.bignum);
-    }
-
+    String decString() { return radixString(10); }
+    String hexString() { return radixString(16); }
+    @Override public String toString() { return decString(); }
     byte[] bigEndianMagnitude() {
-        return NativeBN.BN_bn2bin(this.bignum);
+        byte[] bytes = new byte[(magnitudeBitLength() + 7) / 8];
+        for (int i = 0; i < bytes.length; i++) bytes[bytes.length - 1 - i] = (byte) (words[i / 4] >>> (i % 4 * 8));
+        return bytes;
     }
-
-    int[] littleEndianIntsMagnitude() {
-        return NativeBN.bn2litEndInts(this.bignum);
+    int[] littleEndianIntsMagnitude() { return words.clone(); }
+    int sign() { return sign; }
+    void setSign(int value) { if (sign != 0 && value != 0) sign = value < 0 ? -1 : 1; }
+    boolean twosCompFitsIntoBytes(int count) { return (magnitudeBitLength() + 7) / 8 <= count; }
+    private int magnitudeBitLength() {
+        return sign == 0 ? 0 : (words.length - 1) * 32 + 32 - Integer.numberOfLeadingZeros(words[words.length - 1]);
     }
-
-    int sign() {
-        return NativeBN.sign(this.bignum);
-    }
-
-    void setSign(int val) {
-        if (val > 0) {
-            NativeBN.BN_set_negative(this.bignum, 0);
-        } else {
-            if (val < 0) NativeBN.BN_set_negative(this.bignum, 1);
-        }
-    }
-
-    boolean twosCompFitsIntoBytes(int desiredByteCount) {
-        int actualByteCount = (NativeBN.bitLength(this.bignum) + 7) / 8;
-        return actualByteCount <= desiredByteCount;
-    }
-
     int bitLength() {
-        return NativeBN.bitLength(this.bignum);
+        int bits = magnitudeBitLength();
+        if (sign < 0) {
+            int nonzero = 0;
+            for (int word : words) nonzero += Integer.bitCount(word);
+            if (nonzero == 1) bits--;
+        }
+        return bits;
     }
-
-    boolean isBitSet(int n) {
-        return NativeBN.BN_is_bit_set(this.bignum, n);
+    boolean isBitSet(int bit) { return bit >= 0 && bit / 32 < words.length && (words[bit / 32] & (1 << (bit % 32))) != 0; }
+    private static int compareMagnitude(BigInt a, BigInt b) {
+        if (a.words.length != b.words.length) return a.words.length < b.words.length ? -1 : 1;
+        for (int i = a.words.length - 1; i >= 0; i--) {
+            long x = a.words[i] & MASK, y = b.words[i] & MASK;
+            if (x != y) return x < y ? -1 : 1;
+        }
+        return 0;
     }
-
-    // n > 0: shift left (multiply)
-    static BigInt shift(BigInt a, int n) {
-        BigInt r = newBigInt();
-        NativeBN.BN_shift(r.bignum, a.bignum, n);
-        return r;
+    static int cmp(BigInt a, BigInt b) {
+        if (a.sign != b.sign) return a.sign < b.sign ? -1 : 1;
+        return a.sign == 0 ? 0 : a.sign * compareMagnitude(a, b);
     }
-
-    void shift(int n) {
-        NativeBN.BN_shift(this.bignum, this.bignum, n);
+    private static BigInt sumMagnitude(BigInt a, BigInt b, int sign) {
+        int[] value = new int[Math.max(a.words.length, b.words.length) + 1]; long carry = 0;
+        for (int i = 0; i < value.length - 1; i++) {
+            long sum = carry + (i < a.words.length ? a.words[i] & MASK : 0) + (i < b.words.length ? b.words[i] & MASK : 0);
+            value[i] = (int) sum; carry = sum >>> 32;
+        }
+        value[value.length - 1] = (int) carry; return of(value, sign);
     }
-
-    void addPositiveInt(int w) {
-        NativeBN.BN_add_word(this.bignum, w);
+    private static BigInt differenceMagnitude(BigInt a, BigInt b, int sign) {
+        int[] value = new int[a.words.length]; long borrow = 0;
+        for (int i = 0; i < value.length; i++) {
+            long difference = (a.words[i] & MASK) - (i < b.words.length ? b.words[i] & MASK : 0) - borrow;
+            value[i] = (int) difference; borrow = difference < 0 ? 1 : 0;
+        }
+        return of(value, sign);
     }
-
-    void multiplyByPositiveInt(int w) {
-        NativeBN.BN_mul_word(this.bignum, w);
-    }
-
-    static int remainderByPositiveInt(BigInt a, int w) {
-        return NativeBN.BN_mod_word(a.bignum, w);
-    }
-
     static BigInt addition(BigInt a, BigInt b) {
-        BigInt r = newBigInt();
-        NativeBN.BN_add(r.bignum, a.bignum, b.bignum);
-        return r;
+        if (a.sign == 0) return b.copy(); if (b.sign == 0) return a.copy();
+        if (a.sign == b.sign) return sumMagnitude(a, b, a.sign);
+        int comparison = compareMagnitude(a, b);
+        return comparison >= 0 ? differenceMagnitude(a, b, a.sign) : differenceMagnitude(b, a, b.sign);
     }
-
-    void add(BigInt a) {
-        NativeBN.BN_add(this.bignum, this.bignum, a.bignum);
-    }
-
-    static BigInt subtraction(BigInt a, BigInt b) {
-        BigInt r = newBigInt();
-        NativeBN.BN_sub(r.bignum, a.bignum, b.bignum);
-        return r;
-    }
-
-
-    static BigInt gcd(BigInt a, BigInt b) {
-        BigInt r = newBigInt();
-        NativeBN.BN_gcd(r.bignum, a.bignum, b.bignum);
-        return r;
-    }
-
+    static BigInt subtraction(BigInt a, BigInt b) { BigInt negative = b.copy(); negative.sign = -negative.sign; return addition(a, negative); }
+    void add(BigInt value) { putCopy(addition(this, value)); }
+    void addPositiveInt(int value) { BigInt positive = new BigInt(); positive.putULongInt(value & MASK, false); add(positive); }
     static BigInt product(BigInt a, BigInt b) {
-        BigInt r = newBigInt();
-        NativeBN.BN_mul(r.bignum, a.bignum, b.bignum);
-        return r;
+        if (a.sign == 0 || b.sign == 0) return small(0);
+        int[] value = new int[a.words.length + b.words.length];
+        for (int i = 0; i < a.words.length; i++) {
+            long carry = 0;
+            for (int j = 0; j < b.words.length; j++) {
+                long total = (a.words[i] & MASK) * (b.words[j] & MASK) + (value[i + j] & MASK) + carry;
+                value[i + j] = (int) total; carry = total >>> 32;
+            }
+            value[i + b.words.length] = (int) carry;
+        }
+        return of(value, a.sign * b.sign);
     }
-
-    static BigInt bigExp(BigInt a, BigInt p) {
-        // Sign of p is ignored!
-        BigInt r = newBigInt();
-        NativeBN.BN_exp(r.bignum, a.bignum, p.bignum);
-        return r;
+    void multiplyByPositiveInt(int value) { BigInt factor = new BigInt(); factor.putULongInt(value & MASK, false); putCopy(product(this, factor)); }
+    static BigInt shift(BigInt a, int count) {
+        if (count == 0 || a.sign == 0) return a.copy();
+        if (count == Integer.MIN_VALUE) return small(0);
+        int amount = Math.abs(count), whole = amount / 32, bits = amount % 32;
+        if (count > 0) {
+            int[] value = new int[a.words.length + whole + (bits == 0 ? 0 : 1)];
+            for (int i = 0; i < a.words.length; i++) {
+                value[i + whole] |= a.words[i] << bits;
+                if (bits != 0) value[i + whole + 1] |= a.words[i] >>> (32 - bits);
+            }
+            return of(value, a.sign);
+        }
+        if (whole >= a.words.length) return small(0);
+        int[] value = new int[a.words.length - whole];
+        for (int i = 0; i < value.length; i++) {
+            value[i] = a.words[i + whole] >>> bits;
+            if (bits != 0 && i + whole + 1 < a.words.length) value[i] |= a.words[i + whole + 1] << (32 - bits);
+        }
+        return of(value, a.sign);
     }
-
-    static BigInt exp(BigInt a, int p) {
-        // Sign of p is ignored!
-        BigInt power = new BigInt();
-        power.putLongInt(p);
-        return bigExp(a, power);
-        // OPTIONAL:
-        // int BN_sqr(BigInteger r, BigInteger a, BN_CTX ctx);
-        // int BN_sqr(BIGNUM *r, const BIGNUM *a,BN_CTX *ctx);
-    }
-
+    void shift(int count) { putCopy(shift(this, count)); }
     static void division(BigInt dividend, BigInt divisor, BigInt quotient, BigInt remainder) {
-        long quot, rem;
-        if (quotient != null) {
-            quotient.makeValid();
-            quot = quotient.bignum;
-        } else {
-            quot = 0;
+        if (divisor.sign == 0) throw new ArithmeticException("Division by zero");
+        BigInt left = dividend.copy(); left.sign = left.sign == 0 ? 0 : 1;
+        BigInt right = divisor.copy(); right.sign = 1;
+        BigInt q = small(0), r = left;
+        if (right.words.length == 1 && (right.words[0] & MASK) <= 0x7fffffffL) {
+            long rem = 0, divisorWord = right.words[0] & MASK;
+            int[] value = new int[left.words.length];
+            for (int i = value.length - 1; i >= 0; i--) {
+                long current = (rem << 32) | (left.words[i] & MASK);
+                value[i] = (int) (current / divisorWord); rem = current % divisorWord;
+            }
+            q = of(value, dividend.sign * divisor.sign); r = small(rem); r.setSign(dividend.sign);
+        } else if (compareMagnitude(left, right) >= 0) {
+            int offset = left.magnitudeBitLength() - right.magnitudeBitLength();
+            BigInt shifted = shift(right, offset);
+            int[] value = new int[offset / 32 + 1];
+            for (int bit = offset; bit >= 0; bit--) {
+                if (compareMagnitude(r, shifted) >= 0) {
+                    r = differenceMagnitude(r, shifted, 1); value[bit / 32] |= 1 << (bit % 32);
+                }
+                shifted.shift(-1);
+            }
+            q = of(value, dividend.sign * divisor.sign); r.setSign(dividend.sign);
+        } else r.setSign(dividend.sign);
+        if (quotient != null) quotient.putCopy(q);
+        if (remainder != null) remainder.putCopy(r);
+    }
+    static int remainderByPositiveInt(BigInt a, int value) {
+        BigInt divisor = new BigInt(), remainder = new BigInt(); divisor.putULongInt(value & MASK, false);
+        division(a, divisor, null, remainder); return (int) Math.abs(remainder.longInt());
+    }
+    static BigInt gcd(BigInt a, BigInt b) {
+        BigInt x = a.copy(), y = b.copy(); x.setSign(1); y.setSign(1);
+        while (y.sign != 0) { BigInt remainder = new BigInt(); division(x, y, null, remainder); x = y; y = remainder; }
+        return x;
+    }
+    static BigInt bigExp(BigInt a, BigInt power) {
+        BigInt result = small(1), base = a.copy();
+        for (int bit = 0; bit < power.magnitudeBitLength(); bit++) {
+            if (power.isBitSet(bit)) result = product(result, base);
+            if (bit + 1 < power.magnitudeBitLength()) base = product(base, base);
         }
-        if (remainder != null) {
-            remainder.makeValid();
-            rem = remainder.bignum;
-        } else {
-            rem = 0;
+        return result;
+    }
+    static BigInt exp(BigInt a, int power) { return bigExp(a, small(power)); }
+    static BigInt modulus(BigInt a, BigInt modulus) {
+        if (modulus.sign <= 0) throw new ArithmeticException("Nonpositive modulus");
+        BigInt remainder = new BigInt(); division(a, modulus, null, remainder);
+        return remainder.sign < 0 ? addition(remainder, modulus) : remainder;
+    }
+    static BigInt modExp(BigInt a, BigInt power, BigInt modulus) {
+        BigInt result = modulus(small(1), modulus), base = modulus(a, modulus);
+        for (int bit = 0; bit < power.magnitudeBitLength(); bit++) {
+            if (power.isBitSet(bit)) result = modulus(product(result, base), modulus);
+            if (bit + 1 < power.magnitudeBitLength()) base = modulus(product(base, base), modulus);
         }
-        NativeBN.BN_div(quot, rem, dividend.bignum, divisor.bignum);
+        return result;
     }
-
-    static BigInt modulus(BigInt a, BigInt m) {
-        // Sign of p is ignored! ?
-        BigInt r = newBigInt();
-        NativeBN.BN_nnmod(r.bignum, a.bignum, m.bignum);
-        return r;
+    static BigInt modInverse(BigInt a, BigInt modulus) {
+        if (modulus.sign <= 0) throw new ArithmeticException("Nonpositive modulus");
+        BigInt r = modulus.copy(), nextR = modulus(a, modulus), t = small(0), nextT = small(1);
+        while (nextR.sign != 0) {
+            BigInt quotient = new BigInt(), remainder = new BigInt(); division(r, nextR, quotient, remainder);
+            BigInt coefficient = subtraction(t, product(quotient, nextT)); t = nextT; nextT = coefficient;
+            r = nextR; nextR = remainder;
+        }
+        if (cmp(r, small(1)) != 0) throw new ArithmeticException("Integer is not invertible");
+        return modulus(t, modulus);
     }
-
-    static BigInt modExp(BigInt a, BigInt p, BigInt m) {
-        // Sign of p is ignored!
-        BigInt r = newBigInt();
-        NativeBN.BN_mod_exp(r.bignum, a.bignum, p.bignum, m.bignum);
-        return r;
+    static BigInt generatePrimeDefault(int bits) {
+        long handle = NativeBN.BN_new();
+        if (handle == 0) throw new UnsupportedOperationException("Native prime generation unavailable");
+        try {
+            NativeBN.BN_generate_prime_ex(handle, bits, false, 0, 0);
+            BigInt result = new BigInt(); result.putBigEndian(NativeBN.BN_bn2bin(handle), false); return result;
+        } finally { NativeBN.BN_free(handle); }
     }
-
-
-    static BigInt modInverse(BigInt a, BigInt m) {
-        BigInt r = newBigInt();
-        NativeBN.BN_mod_inverse(r.bignum, a.bignum, m.bignum);
-        return r;
-    }
-
-
-    static BigInt generatePrimeDefault(int bitLength) {
-        BigInt r = newBigInt();
-        NativeBN.BN_generate_prime_ex(r.bignum, bitLength, false, 0, 0);
-        return r;
-    }
-
     boolean isPrime(int certainty) {
-        return NativeBN.BN_primality_test(bignum, certainty, false);
+        long handle = NativeBN.BN_new();
+        if (handle == 0) throw new UnsupportedOperationException("Native primality testing unavailable");
+        try {
+            byte[] magnitude = bigEndianMagnitude(); NativeBN.BN_bin2bn(magnitude, magnitude.length, false, handle);
+            return NativeBN.BN_primality_test(handle, certainty, false);
+        } finally { NativeBN.BN_free(handle); }
     }
 }

@@ -8,7 +8,31 @@ package android.view;
  * missing one throws NoSuchMethodError during Activity creation and stops onCreate before
  * a surface exists. Seven were missing, which is what left Minecraft on a black screen.
  */
-public class KeyEvent extends InputEvent {
+public class KeyEvent extends InputEvent implements android.os.Parcelable {
+    public static final android.os.Parcelable.Creator<KeyEvent> CREATOR =
+            new android.os.Parcelable.Creator<KeyEvent>() {
+                @Override
+                public KeyEvent createFromParcel(android.os.Parcel in) {
+                    return new KeyEvent(in.readInt(), in.readInt());
+                }
+
+                @Override
+                public KeyEvent[] newArray(int size) {
+                    return new KeyEvent[size];
+                }
+            };
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    @Override
+    public void writeToParcel(android.os.Parcel out, int flags) {
+        out.writeInt(getAction());
+        out.writeInt(getKeyCode());
+    }
+
     /** Action: key is pressed down. */
     public static final int ACTION_DOWN = 0;
     /** Action: key is released. */
@@ -53,6 +77,7 @@ public class KeyEvent extends InputEvent {
     private final int mKeyCode;
     private final int mRepeatCount;
     private final long mEventTime;
+    private final long mDownTime;
     private final int mMetaState;
     private final int mUnicodeChar;
 
@@ -73,6 +98,18 @@ public class KeyEvent extends InputEvent {
         mMetaState = metaState;
         mUnicodeChar = unicodeChar;
         mEventTime = android.os.SystemClock.uptimeMillis();
+        mDownTime = mEventTime;
+    }
+
+    public KeyEvent(long downTime, long eventTime, int action, int code, int repeat) {
+        mDownTime = downTime;
+        mEventTime = eventTime;
+        mAction = action;
+        mKeyCode = code;
+        mRepeatCount = repeat;
+        mMetaState = 0;
+        mUnicodeChar = 0;
+        mFlags = 0;
     }
 
     public int getAction() {
@@ -92,7 +129,7 @@ public class KeyEvent extends InputEvent {
     }
 
     public long getDownTime() {
-        return mEventTime;
+        return mDownTime;
     }
 
     public boolean isCanceled() {
@@ -151,6 +188,7 @@ public class KeyEvent extends InputEvent {
     }
 
     public static final int FLAG_CANCELED = 0x20;
+    public static final int FLAG_CANCELED_LONG_PRESS = 0x100;
     public static final int FLAG_TRACKING = 0x200;
     public static final int FLAG_LONG_PRESS = 0x80;
     public static final int FLAG_START_TRACKING = 0x40000000;
@@ -198,8 +236,12 @@ public class KeyEvent extends InputEvent {
 
         public void handleUpEvent(KeyEvent event) {
             final int keyCode = event.getKeyCode();
-            mActiveLongPresses.delete(keyCode);
+            if (mActiveLongPresses.get(keyCode) != 0) {
+                event.mFlags |= FLAG_CANCELED | FLAG_CANCELED_LONG_PRESS;
+                mActiveLongPresses.delete(keyCode);
+            }
             if (mDownKeyCode == keyCode) {
+                event.mFlags |= FLAG_TRACKING;
                 mDownKeyCode = 0;
                 mDownTarget = null;
             }

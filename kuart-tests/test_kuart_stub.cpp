@@ -31,8 +31,20 @@ void Op21c(std::vector<uint16_t>* code, uint8_t op, uint8_t a, uint16_t idx) {
 constexpr uint8_t kOpReturnVoid = 0x0e;
 constexpr uint8_t kOpReturnObject = 0x11;
 constexpr uint8_t kOpNewInstance = 0x22;
+constexpr uint8_t kOpInvokeVirtual = 0x6e;
+
+void Op35c(std::vector<uint16_t>* code, uint8_t op, uint16_t idx, uint8_t reg) {
+    code->push_back(static_cast<uint16_t>(op | (1 << 12)));
+    code->push_back(idx);
+    code->push_back(static_cast<uint16_t>(reg & 0xF));
+}
+
+// An app class deriving from a framework class that KuDroid does not ship, and a method
+// the framework would have supplied.
+const MethodRefSpec kInheritedMissing{"LApp;", "missingFromFramework", "V", {}};
 
 struct Specs {
+    MethodSpec call_missing;
     MethodSpec object_ctor;
     MethodSpec make_stub;  // new-instance on a class that only exists as a stub
 
@@ -43,6 +55,10 @@ struct Specs {
         make_stub.name = "makeStub";
         make_stub.return_type = "Ljava/lang/Object;";
         make_stub.access_flags = 0x9;
+
+        call_missing.name = "callMissing";
+        call_missing.params = {"LApp;"};
+        call_missing.access_flags = 0x9;
     }
 };
 
@@ -68,7 +84,13 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     t.extra_types = {"Landroid/nowhere/Ghost;"};
     t.direct_methods = {s.make_stub};
 
-    return {object, string, class_class, t};
+    ClassSpec app;
+    app.descriptor = "LApp;";
+    app.superclass = "Landroid/nowhere/FrameBase;";
+    app.extra_method_refs = {kInheritedMissing};
+    app.direct_methods = {s.call_missing};
+
+    return {object, string, class_class, t, app};
 }
 
 }  // namespace
@@ -94,6 +116,21 @@ int main() {
         c.push_back(Op11x(kOpReturnObject, 0));
         s.make_stub.code = c;
         s.make_stub.registers_size = 1;
+    }
+
+    // void callMissing(App a) { a.missingFromFramework(); }  -- a == null in the test
+    {
+        DexBuilder idx;
+        idx.Build(BuildClasses(probe));
+        const uint16_t missingIdx =
+            static_cast<uint16_t>(idx.MethodRefIndexOf(kInheritedMissing));
+        std::vector<uint16_t> c;
+        Op35c(&c, kOpInvokeVirtual, missingIdx, 0);
+        c.push_back(Op11x(kOpReturnVoid, 0));
+        s.call_missing.code = c;
+        s.call_missing.registers_size = 1;
+        s.call_missing.ins_size = 1;
+        s.call_missing.outs_size = 1;
     }
 
     DexBuilder builder;
@@ -180,6 +217,18 @@ int main() {
     // for a class with no members is what let a bad Activity candidate through.
     Check(reflect.ForName("android.nowhere.Ghost") == nullptr,
           "DexReflect::ForName reports a stub as absent");
+    {
+        // A reflective miss must not leave a placeholder behind, whereas a bytecode
+        // reference to the same class still gets one.
+        Check(reflect.ForName("android.nowhere.Probe") == nullptr,
+              "ForName on a missing boot class -> null");
+        Check(linker.FindClassNoStub("Landroid/nowhere/Probe;") == nullptr,
+              "ForName leaves no stub behind");
+        kudroid::kuart::DexClass* viaLink = linker.FindClass("Landroid/nowhere/Probe;");
+        Check(viaLink != nullptr && viaLink->is_stub, "FindClass still stubs the same class");
+        Check(linker.FindClassNoStub("Landroid/nowhere/Probe;") == viaLink,
+              "FindClassNoStub returns an existing stub");
+    }
     Check(reflect.ForName("com.mojang.minecraftpe.Main") == nullptr,
           "DexReflect::ForName on an app class that does not exist -> null");
 
@@ -203,6 +252,26 @@ int main() {
             Check(interp.last_error().find("NoClassDefFoundError") != std::string::npos,
                   "the exception is NoClassDefFoundError");
             Check(r.l == nullptr, "no object leaks out of the failed new-instance");
+            interp.ClearPendingException();
+        }
+    }
+
+    // A method the framework lacks, reached through an app subclass, is stubbed rather than
+    // failing with NoSuchMethodError. The receiver is null here, so what surfaces is the
+    // null check that comes after resolution.
+    {
+        kudroid::kuart::DexClass* app = linker.FindClass("LApp;");
+        kudroid::kuart::DexMethod* m =
+            app != nullptr ? app->FindDirectMethod("callMissing", "(LApp;)V") : nullptr;
+        Check(m != nullptr, "found callMissing");
+        if (m != nullptr) {
+            interp.ClearPendingException();
+            DexValue arg;
+            arg.l = nullptr;
+            interp.Execute(m, &arg, 1);
+            Check(interp.HasPendingException() &&
+                      interp.last_error().find("NoSuchMethodError") == std::string::npos,
+                  "a missing inherited framework method resolves to a stub");
             interp.ClearPendingException();
         }
     }

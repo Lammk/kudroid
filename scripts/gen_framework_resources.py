@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 TAG = "android-10.0.0_r47"
 
 # Res_value data types (androidfw/ResourceTypes.h).
+TYPE_NULL = 0x00
 TYPE_REFERENCE = 0x01
 TYPE_ATTRIBUTE = 0x02
 TYPE_STRING = 0x03
@@ -47,6 +48,8 @@ EXTRA_TYPE_IDS = {"fraction": 0x12}
 SCALAR_FILES = re.compile(
     r"^(colors.*|dimens.*|integers|bools|config|config_material)\.xml$")
 STRING_FILES = ("strings.xml", "donottranslate.xml", "donottranslate_material.xml")
+STYLE_FILES = ("themes.xml", "themes_holo.xml", "themes_material.xml", "themes_device_defaults.xml",
+               "styles.xml", "styles_holo.xml", "styles_material.xml", "styles_device_defaults.xml")
 
 UNITS = {
     "px": (TYPE_DIMENSION, 0, 1.0), "dip": (TYPE_DIMENSION, 1, 1.0),
@@ -242,6 +245,83 @@ def convert(kind_tag, text, resolve):
     return None
 
 
+def read_attr_enums(dirpath):
+    """{attr: (is_flag, {name: value})} for every enum/flag attr declared in attrs.xml."""
+    result = {}
+    root = ET.parse(os.path.join(dirpath, "attrs.xml")).getroot()
+    for el in root.iter("attr"):
+        name = el.attrib.get("name")
+        kids = [k for k in el if k.tag in ("enum", "flag")]
+        if not name or not kids or name in result:
+            continue
+        table = {}
+        for k in kids:
+            try:
+                table[k.attrib["name"]] = int(k.attrib["value"], 0) & 0xFFFFFFFF
+            except (KeyError, ValueError):
+                pass
+        result[name] = (kids[0].tag == "flag", table)
+    return result
+
+
+def style_name(ref):
+    """Bare style name of `parent="..."`: @style/X, android:X and *android:X all map to X."""
+    ref = ref.strip()
+    if ref.startswith("@"):
+        ref = ref[1:]
+    ref = ref.lstrip("*")
+    if ref.startswith("android:"):
+        ref = ref[len("android:"):]
+    if ref.startswith("style/"):
+        ref = ref[len("style/"):]
+    return ref
+
+
+def read_styles(dirpath):
+    """{name: (parent_name_or_None, [(item, text)])} from the default-config style files."""
+    styles = {}
+    for fname in STYLE_FILES:
+        path = os.path.join(dirpath, fname)
+        if not os.path.exists(path):
+            continue
+        for el in ET.parse(path).getroot():
+            if el.tag != "style" or "name" not in el.attrib:
+                continue
+            name = el.attrib["name"]
+            if "parent" in el.attrib:
+                parent = style_name(el.attrib["parent"]) or None
+            else:
+                parent = name.rpartition(".")[0] or None
+            items = [(i.attrib["name"], (i.text or "").strip())
+                     for i in el if i.tag == "item" and "name" in i.attrib]
+            if name in styles:
+                items = styles[name][1] + items
+            styles[name] = (parent, items)
+    return styles
+
+
+def convert_style_item(attr, text, enums, resolve):
+    """(type, data) for a style item of `attr`, or None for values a table cannot hold."""
+    if text.startswith("@") or text.startswith("?"):
+        return convert(None, text, resolve)
+    if attr in enums:
+        is_flag, table = enums[attr]
+        tokens = [t.strip() for t in text.split("|")] if is_flag else [text]
+        if tokens and all(t in table for t in tokens):
+            value = 0
+            for t in tokens:
+                value |= table[t]
+            return (TYPE_INT_HEX if is_flag else TYPE_INT_DEC), value
+    if text in ("true", "false"):
+        return convert("bool", text, resolve)
+    if text.startswith("#"):
+        return parse_color(text)
+    as_int = parse_int(text)
+    if as_int is not None:
+        return as_int
+    return parse_number_with_unit(text)
+
+
 def build(aosp):
     values_dir = os.path.join(aosp, "values")
     public = read_public(os.path.join(values_dir, "public.xml"))
@@ -269,6 +349,13 @@ def build(aosp):
             ids[(kind, n)] = (0x01 << 24) | (type_id[kind] << 16) | nxt
             nxt += 1
 
+    # Private styles follow the last public style, in name order.
+    style_defs = read_styles(values_dir)
+    nxt = max_entry.get("style", -1) + 1
+    for n in sorted(n for n in style_defs if ("style", n) not in ids):
+        ids[("style", n)] = (0x01 << 24) | (type_id["style"] << 16) | nxt
+        nxt += 1
+
     def resolve(t, n):
         return ids.get((t, n))
 
@@ -291,10 +378,41 @@ def build(aosp):
     # A public id with no value in values/ is file-backed, an attr, an id or a style: it
     # still needs a name so identifiers and references resolve.
     names = {rid: (t, n) for (t, n), rid in ids.items()}
-    return scalars, strings, names, skipped, public_ids
+
+    # Styles: {id: (parent id, {attr id: (type, data)})}. Items on non-public attrs are
+    # dropped. An item whose value a table cannot hold (strings, references to file-backed
+    # resources) becomes TYPE_NULL instead: it must still hide the parent's value, or the
+    # parent's now-wrong one would show through.
+    enums = read_attr_enums(values_dir)
+    resolvable = set(scalars) | set(strings) | {ids[("style", n)] for n in style_defs}
+    styles = {}
+    dropped = 0
+    for sname, (parent, items) in style_defs.items():
+        sid = ids[("style", sname)]
+        parent_id = ids.get(("style", parent)) if parent else 0
+        if parent and parent_id is None:
+            print("style %s: unknown parent %s" % (sname, parent), file=sys.stderr)
+            parent_id = 0
+        attrs = {}
+        for iname, text in items:
+            aid = ids.get(("attr", iname[len("android:"):] if iname.startswith("android:") else iname))
+            if not aid:
+                dropped += 1
+                continue
+            conv = convert_style_item(iname.replace("android:", "", 1), text, enums, resolve)
+            if conv is not None and conv[0] == TYPE_REFERENCE and conv[1] != 0 \
+                    and conv[1] not in resolvable:
+                conv = None
+            if conv is None:
+                conv = (TYPE_NULL, 0)
+                dropped += 1
+            attrs[aid] = conv
+        styles[sid] = (parent_id, attrs)
+    print("styles: %d, items masked or dropped: %d" % (len(styles), dropped), file=sys.stderr)
+    return scalars, strings, names, skipped, public_ids, styles
 
 
-def emit(path, scalars, strings, names):
+def emit(path, scalars, strings, names, styles):
     blob = bytearray()
     offsets = {}
 
@@ -309,7 +427,8 @@ def emit(path, scalars, strings, names):
     w("// Generated by scripts/gen_framework_resources.py -- do not edit.")
     w("// Source: AOSP %s, frameworks/base/core/res/res/values (Apache License 2.0)." % TAG)
     w("// Scalars: default-configuration color/dimen/integer/bool/fraction values.")
-    w("// Names:   every public resource id plus the private scalar entries above.")
+    w("// Names:   every public resource id plus the private scalar and style entries.")
+    w("// Styles:  default-configuration framework themes/styles, public attrs only.")
     w("")
     w("struct FrameworkScalarEntry { uint32_t id; uint8_t type; uint32_t data; };")
     w("static const FrameworkScalarEntry kFrameworkScalars[] = {")
@@ -322,6 +441,25 @@ def emit(path, scalars, strings, names):
     w("static const FrameworkStringEntry kFrameworkStrings[] = {")
     for rid in sorted(strings):
         w("    {0x%08x, %du}," % (rid, intern(strings[rid])))
+    w("};")
+    w("")
+    w("struct FrameworkStyleEntry { uint32_t id; uint32_t parent; uint32_t first; uint32_t count; };")
+    w("struct FrameworkStyleItem { uint32_t attr; uint8_t type; uint32_t data; };")
+    w("static const FrameworkStyleItem kFrameworkStyleItems[] = {")
+    entries = []
+    first = 0
+    for sid in sorted(styles):
+        parent_id, attrs = styles[sid]
+        entries.append((sid, parent_id, first, len(attrs)))
+        for aid in sorted(attrs):
+            t, d = attrs[aid]
+            w("    {0x%08x, 0x%02x, 0x%08xu}," % (aid, t, d))
+        first += len(attrs)
+    w("    {0, 0, 0u},")
+    w("};")
+    w("static const FrameworkStyleEntry kFrameworkStyles[] = {")
+    for sid, parent_id, first, count in entries:
+        w("    {0x%08x, 0x%08x, %du, %du}," % (sid, parent_id, first, count))
     w("};")
     w("")
     w("struct FrameworkNameEntry { uint32_t id; uint32_t offset; };")
@@ -389,12 +527,12 @@ def main():
     ap.add_argument("--out", default=os.path.join(root, "src/platform/FrameworkResourcesData.inc"))
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
-    scalars, strings, names, skipped, public_ids = build(args.aosp)
+    scalars, strings, names, skipped, public_ids, styles = build(args.aosp)
     for kind, name, text in sorted(skipped):
         print("skipped %s/%s = %r" % (kind, name, text), file=sys.stderr)
-    emit(args.out, scalars, strings, names)
-    print("wrote %s: %d scalars, %d strings, %d names" %
-          (args.out, len(scalars), len(strings), len(names)))
+    emit(args.out, scalars, strings, names, styles)
+    print("wrote %s: %d scalars, %d strings, %d names, %d styles" %
+          (args.out, len(scalars), len(strings), len(names), len(styles)))
     if args.verify:
         verify(args.aosp, public_ids)
 

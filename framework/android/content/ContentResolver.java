@@ -111,4 +111,102 @@ public class ContentResolver {
                       String where, String[] selectionArgs) {
         return 0;
     }
+
+    public android.content.res.AssetFileDescriptor openAssetFileDescriptor(
+            android.net.Uri uri, String mode) throws java.io.FileNotFoundException {
+        if (uri == null) {
+            throw new java.io.FileNotFoundException("null uri");
+        }
+        final String scheme = uri.getScheme();
+        final String path = uri.getPath();
+
+        if (path != null && path.startsWith("/android_asset/")) {
+            String sub = path.substring("/android_asset/".length());
+            Context ctx = mContext != null ? mContext : (sInstance != null ? sInstance.mContext : null);
+            if (ctx != null) {
+                try {
+                    return ctx.getAssets().openFd(sub);
+                } catch (java.io.IOException ignored) {}
+            }
+        }
+
+        if ("file".equals(scheme) || scheme == null) {
+            if (path == null) {
+                throw new java.io.FileNotFoundException("No path for URI: " + uri);
+            }
+            java.io.File file = new java.io.File(path);
+            android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.open(
+                    file, android.os.ParcelFileDescriptor.parseMode(mode));
+            return new android.content.res.AssetFileDescriptor(pfd, 0, file.length());
+        }
+
+        if ("android.resource".equals(scheme)) {
+            Context ctx = mContext != null ? mContext : (sInstance != null ? sInstance.mContext : null);
+            if (ctx != null && path != null && path.length() > 1) {
+                try {
+                    int resId = Integer.parseInt(path.substring(1));
+                    return ctx.getResources().openRawResourceFd(resId);
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+
+        return null;
+    }
+
+    public android.content.res.AssetFileDescriptor openAssetFileDescriptor(
+            android.net.Uri uri, String mode, android.os.CancellationSignal cancellationSignal)
+            throws java.io.FileNotFoundException {
+        return openAssetFileDescriptor(uri, mode);
+    }
+
+    public android.os.ParcelFileDescriptor openFileDescriptor(
+            android.net.Uri uri, String mode) throws java.io.FileNotFoundException {
+        android.content.res.AssetFileDescriptor afd = openAssetFileDescriptor(uri, mode);
+        return afd != null ? afd.getParcelFileDescriptor() : null;
+    }
+
+    public android.os.ParcelFileDescriptor openFileDescriptor(
+            android.net.Uri uri, String mode, android.os.CancellationSignal cancellationSignal)
+            throws java.io.FileNotFoundException {
+        return openFileDescriptor(uri, mode);
+    }
+
+    public java.io.InputStream openInputStream(android.net.Uri uri) throws java.io.FileNotFoundException {
+        if (uri == null) {
+            throw new java.io.FileNotFoundException("null uri");
+        }
+        android.content.res.AssetFileDescriptor afd = openAssetFileDescriptor(uri, "r");
+        if (afd != null) {
+            try {
+                return afd.createInputStream();
+            } catch (java.io.IOException e) {
+                throw new java.io.FileNotFoundException("Unable to create stream: " + e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    public java.io.OutputStream openOutputStream(android.net.Uri uri) throws java.io.FileNotFoundException {
+        return openOutputStream(uri, "wa");
+    }
+
+    public java.io.OutputStream openOutputStream(android.net.Uri uri, String mode)
+            throws java.io.FileNotFoundException {
+        if (uri == null) {
+            throw new java.io.FileNotFoundException("null uri");
+        }
+        android.content.res.AssetFileDescriptor afd = openAssetFileDescriptor(uri, mode);
+        if (afd != null) {
+            try {
+                return afd.createOutputStream();
+            } catch (java.io.IOException e) {
+                throw new java.io.FileNotFoundException("Unable to create stream: " + e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    public String getType(android.net.Uri uri) {
+        return null;
+    }
 }

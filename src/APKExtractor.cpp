@@ -1,5 +1,6 @@
 #include "kudroid/APKExtractor.h"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/ResourceTable.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -174,7 +175,10 @@ bool extractZipEntryToMemory(std::ifstream& f, const ZipEntryInfo& e, std::vecto
 }
 
 // Decompress an entry (stored or deflate) to a file — streaming, do not load the entire entry.
-bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::string& destPath) {
+bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::string& destPath,
+                           uint64_t maxOutput = UINT64_MAX) {
+    if (e.uncompressedSize > maxOutput || (e.compression == 0 && e.compressedSize > maxOutput)) return false;
+    f.clear();
     f.seekg(e.localOffset);
     char lh[30];
     if (!readExact(f, lh, 30) || read32b(lh, 0) != 0x04034b50) return false;
@@ -194,7 +198,7 @@ bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::s
             out.write(buf.data(), static_cast<std::streamsize>(n));
             remaining -= n;
         }
-        return true;
+        return out.good();
     }
 
     if (e.compression != 8) { gLastError = "Unsupported ZIP compression method"; return false; }
@@ -206,6 +210,7 @@ bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::s
     std::size_t remaining = e.compressedSize;
     int ret = Z_OK;
     bool ok = true;
+    uint64_t written = 0;
     while (ret != Z_STREAM_END) {
         if (stream.avail_in == 0) {
             if (remaining == 0) { ok = false; break; }
@@ -218,11 +223,15 @@ bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::s
         stream.next_out = reinterpret_cast<Bytef*>(outBuf.data());
         stream.avail_out = static_cast<uInt>(outBuf.size());
         ret = inflate(&stream, Z_NO_FLUSH);
-        out.write(outBuf.data(), outBuf.size() - stream.avail_out);
+        const size_t produced = outBuf.size() - stream.avail_out;
+        if (produced > maxOutput - written) { ok = false; break; }
+        out.write(outBuf.data(), produced);
+        written += produced;
+        if (!out) { ok = false; break; }
         if (ret != Z_OK && ret != Z_STREAM_END) { ok = false; break; }
     }
     inflateEnd(&stream);
-    return ok;
+    return ok && (maxOutput == UINT64_MAX || written == e.uncompressedSize);
 }
 
 bool endsWithCi(const std::string& s, const char* suffix) {
@@ -292,6 +301,136 @@ static int iconPriority(const std::string& name) {
     else if (lower.rfind("res/drawable", 0) == 0 || lower.rfind("res/mipmap", 0) == 0) score += 10;
 
     return score > 0 ? score : -1;
+}
+
+static std::vector<std::string> parseStringPool(const std::vector<std::uint8_t>& data,
+                                                std::size_t poolOffset);
+
+static bool isBitmapName(const std::string& name) {
+    if (endsWithCi(name, ".9.png")) return false;
+    return endsWithCi(name, ".png") || endsWithCi(name, ".webp") ||
+           endsWithCi(name, ".jpg") || endsWithCi(name, ".jpeg");
+}
+
+// Adaptive icons live in a binary XML that names the foreground/background
+// drawables. Their resource ids lead back to the raster files, which may have
+// been renamed by resource shrinking.
+static void collectAdaptiveIconRefs(const std::vector<std::uint8_t>& data,
+                                    std::vector<std::uint32_t>* ids) {
+    if (ids == nullptr || data.size() < 8 || read16(data, 0) != 0x0003) return;
+    std::size_t cur = read16(data, 2);
+    std::vector<std::uint32_t> foreground;
+    std::vector<std::uint32_t> background;
+    std::vector<std::string> pool;
+    bool havePool = false;
+    while (cur + 8 <= data.size()) {
+        const std::uint32_t type = read32(data, cur);
+        const std::uint32_t size = read32(data, cur + 4);
+        if (size < 8 || cur + size > data.size()) break;
+        if (type == 0x0001) {
+            pool = parseStringPool(data, cur);
+            havePool = !pool.empty();
+        } else if (type == 0x0102 && havePool && cur + 36 <= data.size()) {
+            const std::uint32_t nameIdx = read32(data, cur + 20);
+            const std::string tag = nameIdx < pool.size() ? pool[nameIdx] : "";
+            if (tag == "foreground" || tag == "background") {
+                const std::uint16_t attrStart = read16(data, cur + 24);
+                const std::uint16_t attrSize = read16(data, cur + 26);
+                const std::uint16_t attrCount = read16(data, cur + 28);
+                std::size_t attr = cur + 16 + attrStart;
+                if (attrSize >= 20) {
+                    for (std::uint16_t i = 0; i < attrCount && attr + attrSize <= cur + size;
+                         ++i, attr += attrSize) {
+                        const std::uint32_t attrNameIdx = read32(data, attr + 4);
+                        const std::string attrName =
+                            attrNameIdx < pool.size() ? pool[attrNameIdx] : "";
+                        if (attrName != "drawable" && attrName != "src") continue;
+                        const std::uint8_t attrType = data[attr + 15];
+                        const std::uint32_t attrData = read32(data, attr + 16);
+                        if (attrType == 0x01 && attrData != 0) {
+                            (tag == "foreground" ? foreground : background).push_back(attrData);
+                        }
+                    }
+                }
+            }
+        }
+        cur += size;
+    }
+    ids->insert(ids->end(), foreground.begin(), foreground.end());
+    ids->insert(ids->end(), background.begin(), background.end());
+}
+
+static void appendUnique(std::vector<std::string>* values, const std::string& value) {
+    if (values == nullptr || value.empty()) return;
+    if (std::find(values->begin(), values->end(), value) == values->end()) {
+        values->push_back(value);
+    }
+}
+
+static bool isBitmapData(const std::vector<std::uint8_t>& data) {
+    if (data.size() >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+        data[3] == 'G') return true;
+    if (data.size() >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff) return true;
+    return data.size() >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' &&
+           data[3] == 'F' && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' &&
+           data[11] == 'P';
+}
+
+struct IconPick {
+    const ZipEntryInfo* entry = nullptr;
+    int score = -1;
+};
+
+// Referenced files win over filename guesses, then recognizable icon names, then
+// any bitmap in the archive.
+static IconPick pickIcon(const std::vector<ZipEntryInfo>& entries,
+                         const std::vector<std::string>& preferred) {
+    IconPick pick;
+    for (const auto& entry : entries) {
+        if (!isBitmapName(entry.name)) continue;
+        const int rank = iconPriority(entry.name);
+        if (rank < 0) continue;
+        const bool referenced =
+            std::find(preferred.begin(), preferred.end(), entry.name) != preferred.end();
+        const std::string lower = toLower(entry.name);
+        const bool recognizable = lower.find("launcher") != std::string::npos ||
+                lower.find("icon") != std::string::npos ||
+                lower.find("logo") != std::string::npos;
+        int score = rank;
+        if (referenced) score += 100000;
+        else if (recognizable) score += 10000;
+        if (score > pick.score) pick = {&entry, score};
+    }
+    return pick;
+}
+
+template <typename Reader>
+static std::uint32_t resolveIconPaths(const std::string& iconRef,
+                                      const std::vector<std::uint8_t>& arsc,
+                                      const std::vector<ZipEntryInfo>& entries,
+                                      Reader&& readEntry,
+                                      std::vector<std::string>* paths) {
+    if (paths == nullptr || arsc.empty() || iconRef.empty()) return 0;
+    std::uint32_t iconId = 0;
+    resource_resolve_file_paths(arsc, iconRef, paths, &iconId);
+    if (iconId == 0) return 0;
+
+    std::vector<std::uint32_t> refs;
+    for (const auto& path : *paths) {
+        if (!endsWithCi(path, ".xml")) continue;
+        for (const auto& entry : entries) {
+            if (entry.name != path || entry.uncompressedSize > 1024u * 1024u) continue;
+            std::vector<std::uint8_t> xml;
+            if (readEntry(entry, &xml)) collectAdaptiveIconRefs(xml, &refs);
+            break;
+        }
+    }
+    for (std::uint32_t ref : refs) {
+        std::vector<std::string> nested;
+        if (!resource_id_file_paths(arsc, ref, &nested)) continue;
+        for (const auto& path : nested) appendUnique(paths, path);
+    }
+    return iconId;
 }
 
 static std::vector<std::string> parseStringPool(const std::vector<std::uint8_t>& data, std::size_t poolOffset) {
@@ -574,6 +713,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
                         if (attrName == "theme") info.applicationTheme = attrVal;
+                        if (attrName == "icon") info.appIcon = attrVal;
                         if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
                         // android:name on <application> is the custom Application
                         // subclass; Android instantiates it before any Activity.
@@ -1163,6 +1303,23 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     }
 
     // Save app_icon.png if found
+    // The manifest names the icon resource; res/ file names can be rewritten by
+    // resource shrinking, so resolve the reference instead of guessing.
+    if (extractManifest && !arscData.empty() && !manifestInfo.appIcon.empty()) {
+        std::vector<std::string> preferred;
+        resolveIconPaths(manifestInfo.appIcon, arscData, entries,
+                         [&](const ZipEntryInfo& entry, std::vector<std::uint8_t>* out) {
+                             return extractZipEntryToMemory(apk, entry, *out);
+                         }, &preferred);
+        const IconPick pick = pickIcon(entries, preferred);
+        if (pick.entry != nullptr) {
+            std::vector<std::uint8_t> data;
+            if (extractZipEntryToMemory(apk, *pick.entry, data) && isBitmapData(data)) {
+                bestIconData = std::move(data);
+            }
+        }
+    }
+
     if (!bestIconData.empty()) {
         const auto iconDest = std::filesystem::path(targetDirectory) / "app_icon.png";
         std::ofstream iconFile(iconDest, std::ios::binary);
@@ -1446,6 +1603,27 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
         apkLog("OBB extracted -> " + obbDest.string());
     }
 
+    // A base APK can carry no raster icon when the density splits own it. Fill
+    // app_icon.png from the merged set while the temporary splits still exist.
+    if (ok) {
+        const auto iconDest = std::filesystem::path(targetDirectory) / "app_icon.png";
+        std::error_code iconEc;
+        if (!std::filesystem::exists(iconDest, iconEc)) {
+            const std::string savedError = gLastError;
+            PackagePreview preview;
+            if (preview_package(containerPath, splitDir.string(), "", &preview) &&
+                isBitmapData(preview.icon)) {
+                std::ofstream iconFile(iconDest, std::ios::binary);
+                if (iconFile) {
+                    iconFile.write(reinterpret_cast<const char*>(preview.icon.data()),
+                                   static_cast<std::streamsize>(preview.icon.size()));
+                    if (iconFile) apkLog("  -> Saved app icon from bundle splits");
+                }
+            }
+            gLastError = savedError;
+        }
+    }
+
     // Clean up temp (even if there are errors).
     std::filesystem::remove_all(splitDir, error);
     if (!ok) return false;
@@ -1604,7 +1782,11 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
             inIntentFilter = !isClose;
             if (!isClose) sawAnyIntentFilter = true;
         } else if (tagName == "application") {
-            if (!isClose) info.applicationTheme = extractXmlAttr(tag, "theme");
+            if (!isClose) {
+                info.applicationTheme = extractXmlAttr(tag, "theme");
+                info.appLabel = extractXmlAttr(tag, "label");
+                info.appIcon = extractXmlAttr(tag, "icon");
+            }
             if (!isClose && info.appClass.empty()) {
                 info.appClass = extractXmlAttr(tag, "name");
             }
@@ -1634,6 +1816,157 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     for (ActivityEntry& e : info.activities) qualify(e.name);
 
     return info;
+}
+
+namespace {
+bool inspectPreviewAPK(const std::string& path, const std::string& locale,
+                       PackagePreview* preview, std::vector<std::string>* iconPaths,
+                       std::uint32_t* iconId) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file || file.tellg() < 22) return false;
+    const auto length = file.tellg();
+    std::vector<ZipEntryInfo> entries;
+    if (!readZipEntries(file, length, entries)) return false;
+    auto read = [&](const ZipEntryInfo& entry, uint32_t limit, std::vector<uint8_t>* bytes) {
+        file.clear();
+        return entry.uncompressedSize <= limit && entry.compressedSize <= limit &&
+               extractZipEntryToMemory(file, entry, *bytes);
+    };
+    ManifestInfo manifest;
+    std::vector<uint8_t> table;
+    for (const auto& entry : entries) {
+        if (entry.name == "AndroidManifest.xml") {
+            std::vector<uint8_t> bytes;
+            if (!read(entry, 16u * 1024 * 1024, &bytes)) return false;
+            manifest = APKExtractor::parse_manifest(bytes.data(), bytes.size());
+            if (manifest.packageName.empty()) manifest = APKExtractor::parse_manifest_text(
+                    reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        } else if (entry.name == "resources.arsc") {
+            if (!read(entry, 128u * 1024 * 1024, &table)) return false;
+        }
+    }
+    if (manifest.packageName.empty()) return false;
+    preview->packageName = manifest.packageName;
+    std::vector<std::string> resolved;
+    if (resource_resolve_strings(table, {manifest.appLabel}, locale, &resolved)) {
+        preview->label = resolved[0];
+    } else preview->label = manifest.appLabel;
+    if (preview->label.empty() || preview->label.front() == '@')
+        preview->label = prettifyAppName(manifest.packageName);
+
+    std::vector<std::string> preferred;
+    std::uint32_t id = resolveIconPaths(
+        manifest.appIcon, table, entries,
+        [&](const ZipEntryInfo& entry, std::vector<std::uint8_t>* bytes) {
+            return read(entry, 16u * 1024 * 1024, bytes);
+        }, &preferred);
+    if (iconPaths != nullptr) *iconPaths = preferred;
+    if (iconId != nullptr) *iconId = id;
+
+    const IconPick pick = pickIcon(entries, preferred);
+    if (pick.entry != nullptr &&
+        (!read(*pick.entry, 16u * 1024 * 1024, &preview->icon) ||
+         !isBitmapData(preview->icon))) {
+        preview->icon.clear();
+    }
+    return true;
+}
+}
+
+bool APKExtractor::preview_package(const std::string& path, const std::string& workDirectory,
+                                  const std::string& locale, PackagePreview* preview) {
+    gLastError.clear();
+    if (!preview) return false;
+    *preview = PackagePreview{};
+    std::vector<std::string> iconPaths;
+    std::uint32_t iconId = 0;
+    if (!is_bundle_container(path)) {
+        if (inspectPreviewAPK(path, locale, preview, &iconPaths, &iconId)) return true;
+        gLastError = "Could not read application metadata";
+        return false;
+    }
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) { gLastError = "Could not open package container"; return false; }
+    const auto size = file.tellg();
+    std::vector<ZipEntryInfo> entries;
+    if (!readZipEntries(file, size, entries)) return false;
+    std::vector<ZipEntryInfo> candidates;
+    for (const auto& entry : entries) {
+        if (endsWithCi(entry.name, ".apk") && (entry.name.find('/') == std::string::npos ||
+                entry.name.rfind("splits/", 0) == 0)) candidates.push_back(entry);
+    }
+    auto rank = [](const ZipEntryInfo& entry) {
+        const std::string name = toLower(std::filesystem::path(entry.name).filename().string());
+        if (name == "base.apk" || name == "base-master.apk") return 3;
+        if (name.find("base") != std::string::npos) return 2;
+        return name.find("config") == std::string::npos && name.find("split") == std::string::npos ? 1 : 0;
+    };
+    std::stable_sort(candidates.begin(), candidates.end(), [&](const auto& a, const auto& b) { return rank(a) > rank(b); });
+    const auto temporary = std::filesystem::path(workDirectory) / "preview-base.apk";
+    struct Remove { std::filesystem::path path; ~Remove() { std::error_code ec; std::filesystem::remove(path, ec); } } cleanup{temporary};
+    bool found = false;
+    uint64_t remaining = 4ull * 1024 * 1024 * 1024;
+    uint32_t baseOffset = UINT32_MAX;
+    size_t attempts = 0;
+    for (const auto& entry : candidates) {
+        if (++attempts > 32) break;
+        if (entry.uncompressedSize == 0 || entry.uncompressedSize > remaining ||
+            entry.uncompressedSize > 2ull * 1024 * 1024 * 1024) continue;
+        remaining -= entry.uncompressedSize;
+        if (!extractZipEntryToFile(file, entry, temporary.string(), entry.uncompressedSize)) continue;
+        if (inspectPreviewAPK(temporary.string(), locale, preview, &iconPaths, &iconId)) {
+            found = true; baseOffset = entry.localOffset; break;
+        }
+    }
+    if (!found) { gLastError = "Could not locate a base APK with application metadata"; return false; }
+    // Density splits may contain the raster icon referenced by the base table.
+    // Resolve the same resource id against each split's own table, because a
+    // density split maps that id to a different file path.
+    if (preview->icon.empty() && iconId != 0) {
+        attempts = 0;
+        int bestScore = -1;
+        for (const auto& entry : candidates) {
+            if (++attempts > 32) break;
+            if (entry.localOffset == baseOffset || entry.uncompressedSize == 0 ||
+                entry.uncompressedSize > remaining ||
+                entry.uncompressedSize > 2ull * 1024 * 1024 * 1024) continue;
+            const std::string lower = toLower(entry.name);
+            if (lower.find("armeabi") != std::string::npos ||
+                lower.find("x86") != std::string::npos ||
+                lower.find("mips") != std::string::npos) continue;
+            remaining -= entry.uncompressedSize;
+            if (!extractZipEntryToFile(file, entry, temporary.string(), entry.uncompressedSize)) continue;
+            std::ifstream split(temporary, std::ios::binary | std::ios::ate);
+            if (!split) continue;
+            const auto splitSize = split.tellg();
+            std::vector<ZipEntryInfo> items;
+            if (!readZipEntries(split, splitSize, items)) continue;
+
+            std::vector<std::string> preferred = iconPaths;
+            for (const auto& item : items) {
+                if (item.name != "resources.arsc" || item.uncompressedSize > 128u * 1024 * 1024 ||
+                    item.compressedSize > 128u * 1024 * 1024) continue;
+                std::vector<std::uint8_t> splitTable;
+                if (extractZipEntryToMemory(split, item, splitTable)) {
+                    std::vector<std::string> paths;
+                    if (resource_id_file_paths(splitTable, iconId, &paths)) {
+                        for (const auto& path : paths) appendUnique(&preferred, path);
+                    }
+                }
+                break;
+            }
+
+            const IconPick pick = pickIcon(items, preferred);
+            if (pick.entry == nullptr || pick.score <= bestScore ||
+                pick.entry->uncompressedSize > 16u * 1024 * 1024 ||
+                pick.entry->compressedSize > 16u * 1024 * 1024) continue;
+            std::vector<std::uint8_t> bytes;
+            if (!extractZipEntryToMemory(split, *pick.entry, bytes) || !isBitmapData(bytes)) continue;
+            bestScore = pick.score;
+            preview->icon = std::move(bytes);
+        }
+    }
+    return true;
 }
 
 std::string APKExtractor::get_package_name(const std::string& apkPath) {
@@ -1685,12 +2018,13 @@ std::string APKExtractor::get_package_name(const std::string& apkPath) {
         }
     }
 
-    // Fallback: Automatically filter out version _1.0.10 if available
+    // Remove dotted numeric versions while preserving package underscores.
     std::string stem = std::filesystem::path(apkPath).stem().string();
-    auto idx = stem.find('_');
+    const auto idx = stem.rfind('_');
     if (idx != std::string::npos) {
-        std::string part = stem.substr(0, idx);
-        if (part.find('.') != std::string::npos) return part;
+        const std::string part = stem.substr(0, idx), version = stem.substr(idx + 1);
+        if (part.find('.') != std::string::npos && version.find('.') != std::string::npos &&
+            version.find_first_not_of("0123456789.") == std::string::npos) return part;
     }
     return stem;
 }

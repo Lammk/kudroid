@@ -886,6 +886,33 @@ void TestFsb5Chain(const std::string& root) {
     kudroid::vfs_fclose(g);
 }
 
+void TestCanonicalRoot(kudroid::VFSPathRemapper& remapper, const std::string& originalRoot) {
+    const auto folder = std::filesystem::temp_directory_path() /
+        ("kudroid_root_alias_" + std::to_string(getpid()));
+    std::filesystem::create_directories(folder / "physical");
+    std::filesystem::create_directory_symlink("physical", folder / "alias");
+    remapper.setDocumentsDirectory((folder / "alias").string());
+    char resolved[PATH_MAX] = {};
+    Check(kudroid::vfs_realpath("/sdcard", resolved) != nullptr,
+          "sdcard canonicalizes through a host root alias");
+    Check(remapper.remap(resolved) == resolved, "canonical host root is remapped idempotently");
+    DIR* directory = kudroid::vfs_opendir(resolved);
+    Check(directory != nullptr, "canonical sdcard path reopens");
+    bool found = false;
+    if (directory) {
+        while (auto* entry = kudroid::vfs_readdir(directory)) {
+            if (std::string(entry->d_name) == "Download") found = true;
+        }
+        kudroid::vfs_closedir(directory);
+    }
+    Check(found, "canonical directory enumeration retains child entries");
+    const std::string adjacent = std::filesystem::path(resolved).parent_path().string() + "_outside/file";
+    Check(isInside(remapper.remap(adjacent.c_str()), remapper.androidRoot()),
+          "canonical prefix lookalikes remain contained");
+    remapper.setDocumentsDirectory(std::filesystem::path(originalRoot).parent_path().string());
+    std::filesystem::remove_all(folder);
+}
+
 } // namespace
 
 int main() {
@@ -914,6 +941,7 @@ int main() {
     TestZipIndex(root);
     TestApkStreamIndependence(root);
     TestFsb5Chain(root);
+    TestCanonicalRoot(remapper, root);
 
     std::filesystem::remove_all(home);
 

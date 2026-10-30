@@ -4,7 +4,9 @@ package java.lang;
  * The parent class of all enums. javac generates values()/valueOf() and the $VALUES array for
  * each child enum so here only need name + ordinal.
  */
-public abstract class Enum<E extends Enum<E>> implements Comparable<E> {
+public abstract class Enum<E extends Enum<E>> implements Comparable<E>, java.io.Serializable {
+
+    private static final long serialVersionUID = -2908695906516293478L;
 
     private final String name;
     private final int ordinal;

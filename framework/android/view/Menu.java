@@ -21,7 +21,11 @@ public interface Menu {
 
     SubMenu addSubMenu(CharSequence title);
 
+    SubMenu addSubMenu(int titleRes);
+
     SubMenu addSubMenu(int groupId, int itemId, int order, CharSequence title);
+
+    SubMenu addSubMenu(int groupId, int itemId, int order, int titleRes);
 
     void removeItem(int id);
 

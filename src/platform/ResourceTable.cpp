@@ -3,8 +3,10 @@
 #include "kudroid/platform/AssetShim.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -168,7 +170,13 @@ std::string NormalizeLocale(std::string locale) {
     return locale;
 }
 
-struct ResourceValue { uint8_t type; uint32_t data; std::string locale; };
+struct ResourceQualifiers {
+    bool selectable = true;
+    std::string locale;
+    uint16_t sdk = 0, smallest_width = 0, width = 0, height = 0, density = 0;
+    uint8_t ui_mode = 0, orientation = 0, screen_layout = 0, screen_round = 0, color_mode = 0;
+};
+struct ResourceValue : ResourceQualifiers { uint8_t type = 0; uint32_t data = 0; };
 struct ParserAnalysis {
     ResourceTableAnalysis* result = nullptr;
     std::set<uint32_t> resourceIds;
@@ -258,13 +266,13 @@ void AnalyzeConfig(const uint8_t* config, size_t size, ParserAnalysis* state) {
     if (state == nullptr) return;
     // Offsets follow android::ResTable_config in AOSP ResourceTypes.h. The size
     // passed here is the encoded struct size, so every field remains version-bounded.
-    auto add16 = [&](const char* name, size_t offset) {
+    auto add16 = [&](const char* name, size_t offset, bool supported = false) {
         const uint16_t value = ConfigU16(config, size, offset);
-        if (value != 0) AddQualifier(state, name, Decimal(value), false);
+        if (value != 0) AddQualifier(state, name, Decimal(value), supported);
     };
-    auto add8 = [&](const char* name, size_t offset) {
+    auto add8 = [&](const char* name, size_t offset, bool supported = false) {
         if (ConfigHas(size, offset, 1) && config[offset] != 0)
-            AddQualifier(state, name, Decimal(config[offset]), false);
+            AddQualifier(state, name, Decimal(config[offset]), supported);
     };
 
     add16("mcc", 4);
@@ -282,9 +290,9 @@ void AnalyzeConfig(const uint8_t* config, size_t size, ParserAnalysis* state) {
         AddQualifier(state, "locale.region", region, true);
     }
 
-    add8("orientation", 12);
+    add8("orientation", 12, true);
     add8("touchscreen", 13);
-    add16("density", 14);
+    add16("density", 14, true);
     add8("keyboard", 16);
     add8("navigation", 17);
     if (ConfigHas(size, 18, 1)) {
@@ -296,25 +304,25 @@ void AnalyzeConfig(const uint8_t* config, size_t size, ParserAnalysis* state) {
     add8("grammaticalGender", 19);
     add16("screenWidth", 20);
     add16("screenHeight", 22);
-    add16("sdkVersion", 24);
+    add16("sdkVersion", 24, true);
     add16("minorVersion", 26);
 
     if (ConfigHas(size, 28, 1)) {
         const uint8_t layout = config[28];
-        if ((layout & 0x0f) != 0) AddQualifier(state, "screenLayout.size", Decimal(layout & 0x0f), false);
-        if ((layout & 0x30) != 0) AddQualifier(state, "screenLayout.long", Decimal((layout & 0x30) >> 4), false);
+        if ((layout & 0x0f) != 0) AddQualifier(state, "screenLayout.size", Decimal(layout & 0x0f), true);
+        if ((layout & 0x30) != 0) AddQualifier(state, "screenLayout.long", Decimal((layout & 0x30) >> 4), true);
         if ((layout & 0xc0) != 0)
-            AddQualifier(state, "screenLayout.layoutDirection", Decimal((layout & 0xc0) >> 6), false);
+            AddQualifier(state, "screenLayout.layoutDirection", Decimal((layout & 0xc0) >> 6), true);
     }
     if (ConfigHas(size, 29, 1)) {
         const uint8_t mode = config[29];
-        if ((mode & 0x0f) != 0) AddQualifier(state, "uiMode.type", Decimal(mode & 0x0f), false);
-        if ((mode & 0x30) != 0) AddQualifier(state, "uiMode.night", Decimal((mode & 0x30) >> 4), false);
+        if ((mode & 0x0f) != 0) AddQualifier(state, "uiMode.type", Decimal(mode & 0x0f), true);
+        if ((mode & 0x30) != 0) AddQualifier(state, "uiMode.night", Decimal((mode & 0x30) >> 4), true);
         if ((mode & 0xc0) != 0) AddQualifier(state, "uiMode.unknownBits", Decimal(mode & 0xc0), false);
     }
-    add16("smallestScreenWidthDp", 30);
-    add16("screenWidthDp", 32);
-    add16("screenHeightDp", 34);
+    add16("smallestScreenWidthDp", 30, true);
+    add16("screenWidthDp", 32, true);
+    add16("screenHeightDp", 34, true);
 
     const std::string script = ConfigAscii(config, size, 36, 4);
     if (!script.empty()) AddQualifier(state, "locale.script", script, false);
@@ -322,16 +330,16 @@ void AnalyzeConfig(const uint8_t* config, size_t size, ParserAnalysis* state) {
     if (!variant.empty()) AddQualifier(state, "locale.variant", variant, false);
     if (ConfigHas(size, 48, 1)) {
         const uint8_t round = config[48] & 0x03;
-        if (round != 0) AddQualifier(state, "screenLayout2.round", Decimal(round), false);
+        if (round != 0) AddQualifier(state, "screenLayout2.round", Decimal(round), true);
         if ((config[48] & 0xfc) != 0)
             AddQualifier(state, "screenLayout2.unknownBits", Decimal(config[48] & 0xfc), false);
     }
     if (ConfigHas(size, 49, 1)) {
         const uint8_t color_mode = config[49];
         if ((color_mode & 0x03) != 0)
-            AddQualifier(state, "colorMode.wideColorGamut", Decimal(color_mode & 0x03), false);
+            AddQualifier(state, "colorMode.wideColorGamut", Decimal(color_mode & 0x03), true);
         if ((color_mode & 0x0c) != 0)
-            AddQualifier(state, "colorMode.hdr", Decimal((color_mode & 0x0c) >> 2), false);
+            AddQualifier(state, "colorMode.hdr", Decimal((color_mode & 0x0c) >> 2), true);
         if ((color_mode & 0xf0) != 0)
             AddQualifier(state, "colorMode.unknownBits", Decimal(color_mode & 0xf0), false);
     }
@@ -374,14 +382,99 @@ void FinalizeAnalysis(ParserAnalysis* state) {
     }
 }
 
-struct ResourceBag {
+struct ResourceBag : ResourceQualifiers {
     uint32_t parent = 0;
-    bool selectable = true;
-    std::string locale;
-    uint16_t sdk = 0, smallest_width = 0, width = 0, height = 0;
-    uint8_t ui_mode = 0, orientation = 0;
     std::map<uint32_t, ResourceScalar> attributes;
 };
+
+ResourceQualifiers ReadQualifiers(const uint8_t* config, size_t size) {
+    ResourceQualifiers result;
+    result.locale = ReadLocale(config, size);
+    for (size_t at = 4; at < size; ++at) {
+        const bool supported = (at >= 8 && at <= 12) || (at >= 14 && at <= 15)
+                || (at >= 24 && at <= 25) || (at >= 28 && at <= 35)
+                || at == 48 || at == 49;
+        if (!supported && config[at] != 0) result.selectable = false;
+    }
+    auto byte = [&](size_t at) { return ConfigHas(size, at, 1) ? config[at] : uint8_t{0}; };
+    result.orientation = byte(12);
+    result.density = ConfigU16(config, size, 14);
+    result.sdk = ConfigU16(config, size, 24);
+    result.screen_layout = byte(28);
+    result.ui_mode = byte(29);
+    result.smallest_width = ConfigU16(config, size, 30);
+    result.width = ConfigU16(config, size, 32);
+    result.height = ConfigU16(config, size, 34);
+    result.screen_round = byte(48);
+    result.color_mode = byte(49);
+    if ((result.ui_mode & 0xc0) || (result.screen_round & ~0x03)
+            || (result.color_mode & ~0x0f)) result.selectable = false;
+    return result;
+}
+
+int LocaleRank(const std::string& locale, const std::string& requested) {
+    const std::string candidate = NormalizeLocale(locale);
+    const std::string wanted = NormalizeLocale(requested);
+    if (candidate.empty()) return 0;
+    if (candidate == wanted) return 2;
+    if (candidate.size() == 2 && wanted.size() >= 2 && wanted.compare(0, 2, candidate) == 0) return 1;
+    return -1;
+}
+
+bool QualifiersMatch(const ResourceQualifiers& value, const ResourceStyleConfig& config) {
+    auto matches = [](int candidate, int requested, int mask) {
+        return (candidate & mask) == 0 || (candidate & mask) == (requested & mask);
+    };
+    const int smallestWidth = config.smallest_width_dp > 0 ? config.smallest_width_dp
+            : std::min(config.width_dp, config.height_dp);
+    return value.selectable && LocaleRank(value.locale, config.locale) >= 0
+            && value.sdk <= config.sdk && value.smallest_width <= smallestWidth
+            && value.width <= config.width_dp && value.height <= config.height_dp
+            && (value.orientation == 0 || value.orientation == config.orientation)
+            && (value.screen_layout & 0x0f) <= (config.screen_layout & 0x0f)
+            && matches(value.screen_layout, config.screen_layout, 0xc0)
+            && matches(value.screen_layout, config.screen_layout, 0x30)
+            && matches(value.screen_round, config.screen_layout >> 8, 0x03)
+            && matches(value.color_mode, config.color_mode, 0x03)
+            && matches(value.color_mode, config.color_mode, 0x0c)
+            && matches(value.ui_mode, config.ui_mode, 0x0f)
+            && matches(value.ui_mode, config.ui_mode, 0x30);
+}
+
+bool DensityBetter(int candidate, int other, int requested) {
+    // Android prefers anydpi, then chooses a bucket with a bias toward downscaling.
+    if (candidate == 0xfffe) return true;
+    if (other == 0xfffe) return false;
+    if (candidate == 0) candidate = 160;
+    if (other == 0) other = 160;
+    if (requested == 0 || requested == 0xfffe) requested = 160;
+    const int high = std::max(candidate, other), low = std::min(candidate, other);
+    if (requested >= high) return candidate == high;
+    if (low >= requested) return candidate == low;
+    return ((2LL * low - requested) * high > 1LL * requested * requested)
+            ? candidate == low : candidate == high;
+}
+
+bool QualifiersBetter(const ResourceQualifiers& value, const ResourceQualifiers& other,
+                      const ResourceStyleConfig& config) {
+    auto sizeRank = [&config](int layout) {
+        int size = layout & 0x0f;
+        int normalized = size == 0 && (config.screen_layout & 0x0f) >= 2 ? 2 : size;
+        return normalized * 2 + (size != 0);
+    };
+    // Qualifier precedence follows ResTable_config::isBetterThan.
+    auto rank = [&](const ResourceQualifiers& q) {
+        return std::array<int, 12>{LocaleRank(q.locale, config.locale), (q.screen_layout & 0xc0) != 0,
+            q.smallest_width, (config.width_dp ? q.width : 0) + (config.height_dp ? q.height : 0),
+            sizeRank(q.screen_layout), (q.screen_layout & 0x30) != 0, q.screen_round != 0,
+            (q.color_mode & 0x03) != 0, (q.color_mode & 0x0c) != 0, q.orientation != 0,
+            (q.ui_mode & 0x0f) != 0, (q.ui_mode & 0x30) != 0};
+    };
+    const auto candidateRank = rank(value), otherRank = rank(other);
+    if (candidateRank != otherRank) return candidateRank > otherRank;
+    if (value.density != other.density) return DensityBetter(value.density, other.density, config.density);
+    return value.sdk > other.sdk;
+}
 
 struct ResourceTable {
     std::vector<std::string> globalStrings;
@@ -394,8 +487,10 @@ struct ResourceTable {
     mutable std::unordered_map<uint32_t, std::string> reverseNames;
     bool parse(const std::vector<uint8_t>& bytes, ParserAnalysis* analysis = nullptr);
     const ResourceValue* select(uint32_t id, const std::string& locale) const;
+    const ResourceValue* select(uint32_t id, const ResourceStyleConfig& config) const;
     bool getString(uint32_t id, const std::string& locale, std::string* out, unsigned depth = 0) const;
     bool getColor(uint32_t id, const std::string& locale, uint32_t* out, unsigned depth = 0) const;
+    bool collectFilePaths(uint32_t id, std::vector<std::string>* out, unsigned depth = 0) const;
 };
 
 bool ParseTypeChunk(const std::vector<uint8_t>& bytes, size_t base, size_t packageEnd,
@@ -433,7 +528,7 @@ bool ParseTypeChunk(const std::vector<uint8_t>& bytes, size_t base, size_t packa
         return fail("resource entry offset table is out of bounds");
     const uint32_t typeNameIndex = rawTypeId - 1;
     if (typeNameIndex >= typeNames.size()) return fail("resource type name index is invalid");
-    const std::string locale = ReadLocale(bytes.data() + base + 20, configSize);
+    const ResourceQualifiers qualifiers = ReadQualifiers(bytes.data() + base + 20, configSize);
     AnalyzeConfig(bytes.data() + base + 20, configSize, analysis);
 
     for (uint32_t i = 0; i < entryCount; ++i) {
@@ -483,21 +578,8 @@ bool ParseTypeChunk(const std::vector<uint8_t>& bytes, size_t base, size_t packa
                 ++analysis->result->skipped_entries;
             }
             ResourceBag bag;
+            static_cast<ResourceQualifiers&>(bag) = qualifiers;
             bag.parent = U32(bytes.data() + entry + 8);
-            bag.locale = locale;
-            const uint8_t* config = bytes.data() + base + 20;
-            for (size_t at = 4; at < configSize; ++at) {
-                const bool supported = (at >= 8 && at <= 12) || (at >= 24 && at <= 25)
-                        || (at >= 29 && at <= 35);
-                if (!supported && config[at] != 0) bag.selectable = false;
-            }
-            if (ConfigHas(configSize, 29, 1) && (config[29] & 0xc0) != 0) bag.selectable = false;
-            bag.sdk = ConfigU16(config, configSize, 24);
-            bag.smallest_width = ConfigU16(config, configSize, 30);
-            bag.width = ConfigU16(config, configSize, 32);
-            bag.height = ConfigU16(config, configSize, 34);
-            if (ConfigHas(configSize, 29, 1)) bag.ui_mode = config[29];
-            if (ConfigHas(configSize, 12, 1)) bag.orientation = config[12];
             bool valid = true;
             for (uint32_t mapIndex = 0; mapIndex < mapCount; ++mapIndex) {
                 const size_t mapOffset = mapStart + static_cast<size_t>(mapIndex) * 12u;
@@ -553,7 +635,11 @@ bool ParseTypeChunk(const std::vector<uint8_t>& bytes, size_t base, size_t packa
             }
             continue;
         }
-        table->values[id].push_back(ResourceValue{dataType, data, locale});
+        ResourceValue scalar;
+        static_cast<ResourceQualifiers&>(scalar) = qualifiers;
+        scalar.type = dataType;
+        scalar.data = data;
+        table->values[id].push_back(std::move(scalar));
         const std::string suffix = ":" + typeNames[typeNameIndex] + "/" + keyNames[keyIndex];
         table->identifiers[packageName + suffix] = id;
         table->identifiers["*" + suffix] = id;
@@ -672,6 +758,17 @@ const ResourceValue* ResourceTable::select(uint32_t id, const std::string& reque
     return fallback != nullptr ? fallback : first;
 }
 
+const ResourceValue* ResourceTable::select(uint32_t id, const ResourceStyleConfig& config) const {
+    const auto found = values.find(id);
+    if (found == values.end()) return nullptr;
+    const ResourceValue* best = nullptr;
+    for (const auto& value : found->second) {
+        if (QualifiersMatch(value, config) && (best == nullptr || QualifiersBetter(value, *best, config)))
+            best = &value;
+    }
+    return best;
+}
+
 bool ResourceTable::getString(uint32_t id, const std::string& locale, std::string* out,
                               unsigned depth) const {
     if (out == nullptr || depth >= 32) return false;
@@ -682,6 +779,27 @@ bool ResourceTable::getString(uint32_t id, const std::string& locale, std::strin
     *out = globalStrings[value->data];
     return true;
 }
+bool ResourceTable::collectFilePaths(uint32_t id, std::vector<std::string>* out,
+                                     unsigned depth) const {
+    if (out == nullptr || depth >= 32) return false;
+    const auto found = values.find(id);
+    if (found == values.end()) return false;
+    bool any = false;
+    for (const ResourceValue& value : found->second) {
+        if (value.type == kTypeString && value.data < globalStrings.size()) {
+            const std::string& path = globalStrings[value.data];
+            if (!path.empty() &&
+                std::find(out->begin(), out->end(), path) == out->end()) {
+                out->push_back(path);
+            }
+            any = true;
+        } else if (value.type == kTypeReference) {
+            if (collectFilePaths(value.data, out, depth + 1)) any = true;
+        }
+    }
+    return any;
+}
+
 bool ResourceTable::getColor(uint32_t id, const std::string& locale, uint32_t* out,
                              unsigned depth) const {
     if (out == nullptr || depth >= 32) return false;
@@ -786,8 +904,8 @@ bool resource_get_pool_string(uint32_t index, std::string* value) {
 
 // A reference may cross tables (an app color aliasing @android:color/white), so each hop
 // picks the table that owns the id. Framework ids need no application table at all.
-bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
-                        ResourceScalar* value) {
+static bool GetResourceValue(uint32_t id, const std::string& locale,
+                             const ResourceStyleConfig* config, bool resolve, ResourceScalar* value) {
     if (value == nullptr) return false;
     const auto table = LoadTable();
     std::set<uint32_t> seen;
@@ -800,7 +918,7 @@ bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
             else if (!framework_resource_scalar(id, &type, &data)) return false;
         } else {
             if (!table) return false;
-            const ResourceValue* scalar = table->select(id, locale);
+            const ResourceValue* scalar = config ? table->select(id, *config) : table->select(id, locale);
             if (scalar == nullptr) return false;
             type = scalar->type;
             data = scalar->data;
@@ -821,43 +939,57 @@ bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
     return false;
 }
 
+bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
+                        ResourceScalar* value) {
+    return GetResourceValue(id, locale, nullptr, resolve, value);
+}
+
+bool resource_get_value(uint32_t id, const ResourceStyleConfig& config, bool resolve,
+                        ResourceScalar* value) {
+    return GetResourceValue(id, config.locale, &config, resolve, value);
+}
+
 bool resource_get_style(uint32_t id, const ResourceStyleConfig& config,
                         std::map<uint32_t, ResourceScalar>* attributes) {
     const auto table = LoadTable();
-    if (!table || attributes == nullptr) return false;
+    if (attributes == nullptr) return false;
+    // Without an application table only framework styles can resolve.
+    static const decltype(ResourceTable::bags) kNoBags;
+    const auto& bagMap = table ? table->bags : kNoBags;
     std::vector<const ResourceBag*> chain;
+    std::deque<ResourceBag> frameworkBags;
     std::set<uint32_t> seen;
-    const std::string wanted = NormalizeLocale(config.locale);
     while (id != 0) {
         if (!seen.insert(id).second || seen.size() > 64) return false;
-        const auto found = table->bags.find(id);
-        if (found == table->bags.end()) {
-            const ResourceValue* alias = table->select(id, config.locale);
+        const auto found = bagMap.find(id);
+        if (found == bagMap.end()) {
+            const ResourceValue* alias = table ? table->select(id, config) : nullptr;
             if (alias != nullptr && alias->type == kTypeReference) { id = alias->data; continue; }
-            // Framework parents can be absent from an application resource table.
+            // Framework styles live in the built-in table, not in the application's.
+            uint32_t parent = 0;
+            std::vector<uint32_t> triples;
+            if (framework_resource_style(id, &parent, &triples)) {
+                frameworkBags.emplace_back();
+                ResourceBag& bag = frameworkBags.back();
+                bag.parent = parent;
+                for (size_t i = 0; i + 2 < triples.size(); i += 3) {
+                    ResourceScalar scalar;
+                    scalar.type = static_cast<uint8_t>(triples[i + 1]);
+                    scalar.data = triples[i + 2];
+                    bag.attributes[triples[i]] = std::move(scalar);
+                }
+                chain.push_back(&bag);
+                id = parent;
+                continue;
+            }
+            // Unknown framework parents end the chain.
             if (!chain.empty() && (id >> 24) == 1) break;
             return false;
         }
         const ResourceBag* best = nullptr;
-        std::vector<int> best_rank;
         for (const ResourceBag& bag : found->second) {
-            if (!bag.selectable) continue;
-            const std::string locale = NormalizeLocale(bag.locale);
-            int language = 0;
-            if (!locale.empty()) {
-                if (locale == wanted) language = 2;
-                else if (locale.size() == 2 && wanted.size() >= 2 && wanted.compare(0, 2, locale) == 0) language = 1;
-                else continue;
-            }
-            if (bag.sdk > config.sdk || bag.smallest_width > std::min(config.width_dp, config.height_dp)
-                    || bag.width > config.width_dp || bag.height > config.height_dp
-                    || (bag.orientation != 0 && bag.orientation != config.orientation)
-                    || ((bag.ui_mode & 0x0f) != 0 && (bag.ui_mode & 0x0f) != (config.ui_mode & 0x0f))
-                    || ((bag.ui_mode & 0x30) != 0 && (bag.ui_mode & 0x30) != (config.ui_mode & 0x30))) continue;
-            std::vector<int> rank{language, bag.smallest_width, bag.width, bag.height,
-                                  bag.orientation != 0, (bag.ui_mode & 0x0f) != 0,
-                                  (bag.ui_mode & 0x30) != 0, bag.sdk};
-            if (best == nullptr || rank > best_rank) { best = &bag; best_rank = std::move(rank); }
+            if (QualifiersMatch(bag, config) && (best == nullptr || QualifiersBetter(bag, *best, config)))
+                best = &bag;
         }
         if (best == nullptr) return false;
         chain.push_back(best);
@@ -873,6 +1005,81 @@ bool resource_get_style(uint32_t id, const ResourceStyleConfig& config,
 
 // Resources.getIdentifier: the name is "[package:][type/]entry"; defType and defPackage
 // fill in whatever the name leaves out. "android" selects the framework table.
+// Inspect a table without replacing the running application's resource cache.
+bool resource_resolve_strings(const std::vector<uint8_t>& bytes,
+                              const std::vector<std::string>& references,
+                              const std::string& locale, std::vector<std::string>* values) {
+    if (!values) return false;
+    ResourceTable table;
+    if (!table.parse(bytes)) return false;
+    values->clear();
+    for (const auto& reference : references) {
+        std::string value;
+        if (reference.empty() || reference.front() != '@') value = reference;
+        else {
+            const std::string key = reference.substr(1);
+            uint32_t id = 0;
+            if (!key.empty() && key.front() >= '0' && key.front() <= '9') {
+                try {
+                    size_t end = 0;
+                    const auto number = std::stoull(key, &end, 0);
+                    if (end == key.size() && number <= UINT32_MAX) id = static_cast<uint32_t>(number);
+                } catch (...) {}
+            } else {
+                const auto found = table.identifiers.find(key.find(':') == std::string::npos
+                        ? table.defaultPackage + ":" + key : key);
+                if (found != table.identifiers.end()) id = found->second;
+            }
+            if (id) (void)table.getString(id, locale, &value);
+        }
+        values->push_back(std::move(value));
+    }
+    return true;
+}
+
+namespace {
+uint32_t ReferenceToId(const ResourceTable& table, const std::string& reference) {
+    if (reference.empty() || reference.front() != '@') return 0;
+    const std::string key = reference.substr(1);
+    if (!key.empty() && key.front() >= '0' && key.front() <= '9') {
+        try {
+            size_t end = 0;
+            const auto number = std::stoull(key, &end, 0);
+            if (end == key.size() && number <= UINT32_MAX) return static_cast<uint32_t>(number);
+        } catch (...) {}
+        return 0;
+    }
+    const auto found = table.identifiers.find(key.find(':') == std::string::npos
+            ? table.defaultPackage + ":" + key : key);
+    return found != table.identifiers.end() ? found->second : 0;
+}
+}  // namespace
+
+bool resource_resolve_file_paths(const std::vector<uint8_t>& bytes,
+                                 const std::string& reference,
+                                 std::vector<std::string>* paths,
+                                 uint32_t* resource_id) {
+    if (paths == nullptr) return false;
+    paths->clear();
+    if (resource_id != nullptr) *resource_id = 0;
+    ResourceTable table;
+    if (!table.parse(bytes)) return false;
+    const uint32_t id = ReferenceToId(table, reference);
+    if (id == 0) return false;
+    if (resource_id != nullptr) *resource_id = id;
+    return table.collectFilePaths(id, paths);
+}
+
+bool resource_id_file_paths(const std::vector<uint8_t>& bytes, uint32_t resource_id,
+                            std::vector<std::string>* paths) {
+    if (paths == nullptr) return false;
+    paths->clear();
+    if (resource_id == 0) return false;
+    ResourceTable table;
+    if (!table.parse(bytes)) return false;
+    return table.collectFilePaths(resource_id, paths);
+}
+
 bool resource_get_identifier(const std::string& name, const std::string& type,
                              const std::string& package, uint32_t* id) {
     if (id == nullptr || name.empty()) return false;

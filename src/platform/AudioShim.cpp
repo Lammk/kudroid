@@ -102,9 +102,13 @@ struct AudioPlayer {
     int32_t outputError = 0;
     void* callback = nullptr;   // SLAndroidSimpleBufferQueueCallback
     void* context = nullptr;
+    void* aaudioDataCallback = nullptr;
+    void* aaudioUserData = nullptr;
     uint32_t playState = SL_PLAYSTATE_STOPPED;
+    uint32_t aaudioState = 3;  // AAUDIO_STREAM_STATE_OPENED
     void* iface = nullptr;
     uint32_t pendingCount = 0;
+    bool aaudioCallbackLogged = false;
 
     double sampleRate = 48000.0;
     uint32_t channels = 2;
@@ -131,6 +135,8 @@ struct AudioPlayer {
 
     // Interleaved 16-bit PCM ring buffer.
     std::vector<int16_t> ring;
+    // AAudio callback output in the stream's source format before conversion.
+    std::vector<uint8_t> aaudioScratch;
     size_t ringHead = 0;
     size_t ringCount = 0;
 
@@ -286,23 +292,76 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
     if (!p) return;
     AudioRead read;
     auto* out = static_cast<int16_t*>(buffer->mAudioData);
+    void* aaudioCallback = nullptr;
+    void* aaudioUserData = nullptr;
+    bool aaudioFloat = false;
+    uint32_t generation = 0;
     {
         std::lock_guard<std::mutex> lock(p->mtx);
         if (p->shutdown || p->aqResetting) return;
+        generation = p->generation;
+        aaudioCallback = p->aaudioDataCallback;
+        aaudioUserData = p->aaudioUserData;
+        aaudioFloat = p->floatSamples;
         for (int i = 0; i < kAudioQueueNumBuffers; ++i) {
             if (p->aqBuffers[i] != buffer) continue;
             if (p->aqBufferGeneration[i] == p->generation) {
                 p->framesPlayed.fetch_add(p->aqBufferFrames[i], std::memory_order_relaxed);
             }
-            read = player_read_pcm(p.get(), out, kAudioQueueFramesPerBuffer);
+            if (aaudioCallback != nullptr) {
+                read.frames = kAudioQueueFramesPerBuffer;
+                read.generation = generation;
+            } else {
+                read = player_read_pcm(p.get(), out, kAudioQueueFramesPerBuffer);
+            }
             p->aqBufferFrames[i] = read.frames;
-            p->aqBufferGeneration[i] = p->generation;
+            p->aqBufferGeneration[i] = generation;
             break;
         }
     }
-    // Ramp the edges of a gap: a hard cut to zero (and a hard start after it) is a
-    // broadband click at every stall.
-    {
+    if (aaudioCallback != nullptr) {
+        struct CallbackScope {
+            AudioPlayer* previous;
+            explicit CallbackScope(AudioPlayer* current) : previous(g_audioCallbackPlayer) {
+                g_audioCallbackPlayer = current;
+            }
+            ~CallbackScope() { g_audioCallbackPlayer = previous; }
+        } scope(p.get());
+        const size_t ch = p->channels;
+        const size_t samples = kAudioQueueFramesPerBuffer * ch;
+        std::memset(out, 0, samples * sizeof(int16_t));
+        int32_t result = 0;
+        if (aaudioFloat) {
+            auto* scratch = reinterpret_cast<float*>(p->aaudioScratch.data());
+            if (scratch != nullptr && p->aaudioScratch.size() >= samples * sizeof(float)) {
+                std::memset(scratch, 0, samples * sizeof(float));
+                result = reinterpret_cast<int32_t (*)(void*, void*, void*, int32_t)>(
+                    aaudioCallback)(p->iface, aaudioUserData, scratch,
+                                    static_cast<int32_t>(kAudioQueueFramesPerBuffer));
+                for (size_t i = 0; i < samples; ++i) {
+                    float value = scratch[i];
+                    if (!std::isfinite(value)) value = 0;
+                    out[i] = static_cast<int16_t>(
+                        std::lrintf(std::clamp(value, -1.0f, 1.0f) * 32767.0f));
+                }
+            }
+        } else {
+            result = reinterpret_cast<int32_t (*)(void*, void*, void*, int32_t)>(
+                aaudioCallback)(p->iface, aaudioUserData, out,
+                                static_cast<int32_t>(kAudioQueueFramesPerBuffer));
+        }
+        if (result == 1) {
+            std::lock_guard<std::mutex> lock(p->mtx);
+            p->playState = SL_PLAYSTATE_STOPPED;
+            p->aaudioState = 11;  // AAUDIO_STREAM_STATE_STOPPED
+            p->cv.notify_all();
+            std::memset(out, 0, samples * sizeof(int16_t));
+        } else if (result != 0) {
+            std::memset(out, 0, samples * sizeof(int16_t));
+        }
+    } else {
+        // Ramp the edges of a gap: a hard cut to zero (and a hard start after it) is a
+        // broadband click at every stall.
         const size_t ch = p->channels;
         constexpr size_t kRamp = 64;
         const size_t ramp = read.frames < kRamp ? read.frames : kRamp;
@@ -375,6 +434,9 @@ static bool open_audio_queue(AudioPlayer* p) {
         {
             std::lock_guard<std::mutex> lock(p->mtx);
             if (p->ring.empty()) p->ring.assign(kRingBufferFrames * p->channels, 0);
+            if (p->floatSamples && p->aaudioScratch.empty()) {
+                p->aaudioScratch.assign(kAudioQueueFramesPerBuffer * p->channels * sizeof(float), 0);
+            }
         }
         const UInt32 bytes = static_cast<UInt32>(kAudioQueueFramesPerBuffer * p->channels * 2);
         for (int i = 0; i < kAudioQueueNumBuffers && st == noErr; ++i) {
@@ -698,6 +760,14 @@ static int32_t set_player_state(AudioPlayer* p, uint32_t state, bool reset = fal
         p->cv.notify_all();
     }
 #if defined(__APPLE__)
+    if (state == SL_PLAYSTATE_PLAYING && p->aaudioDataCallback != nullptr && !p->aq) {
+        if (!open_audio_queue(p)) {
+            std::lock_guard<std::mutex> lock(p->mtx);
+            p->outputError = -1;
+            p->cv.notify_all();
+            return -1;
+        }
+    }
     if (p->aq) {
         OSStatus st = reset ? reset_audio_output(p) : noErr;
         if (st == noErr && state == SL_PLAYSTATE_PLAYING &&
@@ -937,17 +1007,22 @@ struct AAudioStreamImpl {
     int32_t sampleRate = 48000;
     int32_t channels = 2;
     int32_t format = AAUDIO_FORMAT_PCM_I16;
+    int32_t framesPerBurst = static_cast<int32_t>(kAudioQueueFramesPerBuffer);
+    int32_t bufferCapacityFrames = 2 * static_cast<int32_t>(kAudioQueueFramesPerBuffer);
+    int32_t bufferSizeFrames = static_cast<int32_t>(kAudioQueueFramesPerBuffer);
 };
 
 struct AAudioBuilderState {
     int32_t sampleRate = 48000;
     int32_t channels = 2;
     int32_t format = AAUDIO_FORMAT_PCM_I16;
+    void* dataCallback = nullptr;
+    void* userData = nullptr;
+    int32_t bufferCapacityFrames = 0;
 };
 
 constexpr int32_t kAAudioOk = 0;
 constexpr int32_t kAAudioErrorInvalidHandle = -892;
-constexpr int32_t kAAudioErrorUnimplemented = -906;
 
 static std::mutex g_builderMtx;
 static std::unordered_map<void*, AAudioBuilderState> g_builderStates;
@@ -1002,8 +1077,37 @@ extern "C" int32_t bionic_AAudioStreamBuilder_setFormat(void* builder, int32_t f
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setDataCallback(void* builder, void* callback, void* userData) {
+    if (AAudioBuilderState* st = builder_state(builder)) {
+        st->dataCallback = callback;
+        st->userData = userData;
+    }
+    return kAAudioOk;
+}
+
+extern "C" int32_t bionic_AAudioStreamBuilder_setErrorCallback(void* builder, void* callback, void* userData) {
     (void)builder; (void)callback; (void)userData;
-    return kAAudioErrorUnimplemented;
+    return kAAudioOk;
+}
+
+extern "C" int32_t bionic_AAudioStreamBuilder_setBufferCapacityInFrames(void* builder,
+                                                                       int32_t frames) {
+    if (AAudioBuilderState* st = builder_state(builder)) st->bufferCapacityFrames = frames;
+    return kAAudioOk;
+}
+
+extern "C" int32_t bionic_AAudioStreamBuilder_setDeviceId(void* builder, int32_t deviceId) {
+    (void)builder; (void)deviceId;
+    return kAAudioOk;
+}
+
+extern "C" int32_t bionic_AAudioStreamBuilder_setUsage(void* builder, int32_t usage) {
+    (void)builder; (void)usage;
+    return kAAudioOk;
+}
+
+extern "C" int32_t bionic_AAudioStreamBuilder_setInputPreset(void* builder, int32_t preset) {
+    (void)builder; (void)preset;
+    return kAAudioOk;
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** stream) {
@@ -1019,6 +1123,9 @@ extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** s
     impl->sampleRate = st.sampleRate;
     impl->channels = st.channels;
     impl->format = st.format;
+    if (st.bufferCapacityFrames > 0) {
+        impl->bufferCapacityFrames = std::max(st.bufferCapacityFrames, impl->framesPerBurst);
+    }
     auto player = std::make_shared<AudioPlayer>();
     player->iface = player.get();
     player->sampleRate = impl->sampleRate > 0 ? static_cast<double>(impl->sampleRate) : 48000.0;
@@ -1026,7 +1133,12 @@ extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** s
     if (player->channels > 8) return -898;
     player->bitsPerSample = (impl->format == AAUDIO_FORMAT_PCM_FLOAT) ? 32 : 16;
     player->floatSamples = impl->format == AAUDIO_FORMAT_PCM_FLOAT;
+    player->aaudioDataCallback = st.dataCallback;
+    player->aaudioUserData = st.userData;
     impl->player = player;
+    std::fprintf(stderr, "[KuDroidAudio] AAudio open rate=%d channels=%d format=%d mode=%s\n",
+                 impl->sampleRate, impl->channels, impl->format,
+                 st.dataCallback != nullptr ? "callback" : "write");
     {
         std::lock_guard<std::mutex> lock(g_streams_mtx);
         g_streams[player.get()] = impl;
@@ -1048,18 +1160,23 @@ extern "C" int32_t bionic_AAudioStreamBuilder_delete(void* builder) {
 extern "C" int32_t bionic_AAudioStream_requestStart(void* stream) {
     auto impl = find_stream(stream);
     if (!impl) return 1;
-    return set_player_state(impl->player.get(), SL_PLAYSTATE_PLAYING);
+    impl->player->aaudioState = 5;  // AAUDIO_STREAM_STATE_STARTED
+    int32_t result = set_player_state(impl->player.get(), SL_PLAYSTATE_PLAYING);
+    if (result != 0) impl->player->aaudioState = 11;  // AAUDIO_STREAM_STATE_STOPPED
+    return result;
 }
 
 extern "C" int32_t bionic_AAudioStream_requestStop(void* stream) {
     auto impl = find_stream(stream);
     if (!impl) return 1;
+    impl->player->aaudioState = 11;  // AAUDIO_STREAM_STATE_STOPPED
     return set_player_state(impl->player.get(), SL_PLAYSTATE_STOPPED);
 }
 
 extern "C" int32_t bionic_AAudioStream_close(void* stream) {
     auto impl = find_stream(stream);
     if (!impl) return 1;
+    impl->player->aaudioState = 13;  // AAUDIO_STREAM_STATE_CLOSED
     close_player(impl->player);
     {
         std::lock_guard<std::mutex> lock(g_streams_mtx);
@@ -1085,6 +1202,50 @@ extern "C" int32_t bionic_AAudioStream_getChannelCount(void* stream) {
 extern "C" int32_t bionic_AAudioStream_getFormat(void* stream) {
     auto impl = find_stream(stream);
     return impl ? impl->format : AAUDIO_FORMAT_PCM_I16;
+}
+
+extern "C" int32_t bionic_AAudioStream_getFramesPerBurst(void* stream) {
+    auto impl = find_stream(stream);
+    return impl ? impl->framesPerBurst : static_cast<int32_t>(kAudioQueueFramesPerBuffer);
+}
+
+extern "C" int32_t bionic_AAudioStream_getBufferCapacityInFrames(void* stream) {
+    auto impl = find_stream(stream);
+    return impl ? impl->bufferCapacityFrames : 2 * static_cast<int32_t>(kAudioQueueFramesPerBuffer);
+}
+
+extern "C" int32_t bionic_AAudioStream_getBufferSizeInFrames(void* stream) {
+    auto impl = find_stream(stream);
+    return impl ? impl->bufferSizeFrames : static_cast<int32_t>(kAudioQueueFramesPerBuffer);
+}
+
+extern "C" int32_t bionic_AAudioStream_setBufferSizeInFrames(void* stream, int32_t frames) {
+    (void)frames;
+    auto impl = find_stream(stream);
+    if (!impl) return 1;
+    impl->bufferSizeFrames = impl->framesPerBurst;
+    return impl->bufferSizeFrames;
+}
+
+extern "C" int32_t bionic_AAudioStream_getState(void* stream) {
+    auto impl = find_stream(stream);
+    return impl ? static_cast<int32_t>(impl->player->aaudioState) : 0;
+}
+
+extern "C" int32_t bionic_AAudioStream_getXRunCount(void* stream) {
+    (void)stream;
+    return 0;
+}
+
+extern "C" int32_t bionic_AAudioStream_getDeviceId(void* stream) {
+    (void)stream;
+    return 0;
+}
+
+extern "C" int32_t bionic_AAudioStream_read(void* stream, void* buffer, int32_t numFrames,
+                                            int64_t timeoutNanoseconds) {
+    (void)stream; (void)buffer; (void)numFrames; (void)timeoutNanoseconds;
+    return 0;
 }
 
 extern "C" int32_t bionic_AAudioStream_write(void* stream, const void* buffer,
@@ -1277,6 +1438,11 @@ const SymbolEntry kAudioSymbols[] = {
     {"AAudioStreamBuilder_setChannelCount", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setChannelCount)},
     {"AAudioStreamBuilder_setFormat", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setFormat)},
     {"AAudioStreamBuilder_setDataCallback", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setDataCallback)},
+    {"AAudioStreamBuilder_setErrorCallback", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setErrorCallback)},
+    {"AAudioStreamBuilder_setBufferCapacityInFrames", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setBufferCapacityInFrames)},
+    {"AAudioStreamBuilder_setDeviceId", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setDeviceId)},
+    {"AAudioStreamBuilder_setUsage", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setUsage)},
+    {"AAudioStreamBuilder_setInputPreset", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_setInputPreset)},
     {"AAudioStreamBuilder_openStream", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_openStream)},
     {"AAudioStreamBuilder_delete", reinterpret_cast<void*>(&bionic_AAudioStreamBuilder_delete)},
     {"AAudioStream_requestStart", reinterpret_cast<void*>(&bionic_AAudioStream_requestStart)},
@@ -1285,6 +1451,14 @@ const SymbolEntry kAudioSymbols[] = {
     {"AAudioStream_getSampleRate", reinterpret_cast<void*>(&bionic_AAudioStream_getSampleRate)},
     {"AAudioStream_getChannelCount", reinterpret_cast<void*>(&bionic_AAudioStream_getChannelCount)},
     {"AAudioStream_getFormat", reinterpret_cast<void*>(&bionic_AAudioStream_getFormat)},
+    {"AAudioStream_getFramesPerBurst", reinterpret_cast<void*>(&bionic_AAudioStream_getFramesPerBurst)},
+    {"AAudioStream_getBufferCapacityInFrames", reinterpret_cast<void*>(&bionic_AAudioStream_getBufferCapacityInFrames)},
+    {"AAudioStream_getBufferSizeInFrames", reinterpret_cast<void*>(&bionic_AAudioStream_getBufferSizeInFrames)},
+    {"AAudioStream_setBufferSizeInFrames", reinterpret_cast<void*>(&bionic_AAudioStream_setBufferSizeInFrames)},
+    {"AAudioStream_getState", reinterpret_cast<void*>(&bionic_AAudioStream_getState)},
+    {"AAudioStream_getXRunCount", reinterpret_cast<void*>(&bionic_AAudioStream_getXRunCount)},
+    {"AAudioStream_getDeviceId", reinterpret_cast<void*>(&bionic_AAudioStream_getDeviceId)},
+    {"AAudioStream_read", reinterpret_cast<void*>(&bionic_AAudioStream_read)},
     {"AAudioStream_write", reinterpret_cast<void*>(&bionic_AAudioStream_write)},
 };
 

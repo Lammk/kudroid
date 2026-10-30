@@ -28,6 +28,10 @@ public abstract class Context {
     public static final int MODE_ENABLE_WRITE_AHEAD_LOGGING = 0x0008;
     public static final int MODE_NO_LOCALIZED_COLLATORS = 0x0010;
 
+    public static final int CONTEXT_INCLUDE_CODE = 0x00000001;
+    public static final int CONTEXT_IGNORE_SECURITY = 0x00000002;
+    public static final int CONTEXT_RESTRICTED = 0x00000004;
+
     public static final String VIBRATOR_SERVICE = "vibrator";
     public static final String VIBRATOR_MANAGER_SERVICE = "vibrator_manager";
     public static final String SENSOR_SERVICE = "sensor";
@@ -63,6 +67,7 @@ public abstract class Context {
     public static final String MEDIA_ROUTER_SERVICE = "media_router";
     public static final String MEDIA_SESSION_SERVICE = "media_session";
     public static final String GRAMMATICAL_INFLECTION_SERVICE = "grammatical_inflection";
+    public static final String UI_MODE_SERVICE = "uimode";
 
     public abstract AssetManager getAssets();
     public abstract Resources getResources();
@@ -313,6 +318,7 @@ public abstract class Context {
         if (name.equals(MEDIA_ROUTER_SERVICE)) return MediaRouterHolder.get();
         // VibratorManager wraps a Vibrator on Android 12+; apps target either.
         if (name.equals(VIBRATOR_MANAGER_SERVICE)) return new SystemVibrator();
+        if (name.equals(UI_MODE_SERVICE)) return new android.app.UiModeManager();
 
         reportUnknownService(name);
         return null;
@@ -336,7 +342,7 @@ public abstract class Context {
             KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
             APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
             INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
-            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE, UI_MODE_SERVICE,
         };
 
         for (int i = 0; i < candidates.length; ++i) {
@@ -368,7 +374,7 @@ public abstract class Context {
             KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
             APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
             INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
-            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE, UI_MODE_SERVICE,
         };
         for (int i = 0; i < candidates.length; ++i) {
             final Object service = getSystemService(candidates[i]);
@@ -574,4 +580,14 @@ public abstract class Context {
     }
 
     public boolean isRestricted() { return false; }
+
+    public Context createPackageContext(String packageName, int flags)
+            throws PackageManager.NameNotFoundException {
+        String self = getPackageName();
+        if (packageName == null || packageName.isEmpty() ||
+            packageName.equals(self) || "android".equals(packageName)) {
+            return this;
+        }
+        throw new PackageManager.NameNotFoundException(packageName);
+    }
 }

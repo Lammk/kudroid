@@ -139,4 +139,12 @@ public class AudioManager {
         }
         return AUDIOFOCUS_REQUEST_GRANTED;
     }
+
+    private static final java.util.concurrent.atomic.AtomicInteger sSessionIds =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+
+    /** A fresh, positive audio session id; the value is only an identifier here. */
+    public int generateAudioSessionId() {
+        return sSessionIds.getAndIncrement();
+    }
 }

@@ -89,13 +89,22 @@ int main() {
     Check(offsetof(GuestAddrinfo, ai_addr) == 32, "GuestAddrinfo ai_addr is at offset 32");
     Check(offsetof(GuestAddrinfo, ai_next) == 40, "GuestAddrinfo ai_next is at offset 40");
 
-    Check(AddrInfoFlagsToHost(0x400) == 0x1000, "Linux AI_NUMERICSERV (0x400) moves to Darwin 0x1000");
-    Check(AddrInfoFlagsToHost(0x8) == 0x800, "Linux AI_V4MAPPED (0x8) moves to Darwin 0x800");
-    Check(AddrInfoFlagsToHost(0x10) == 0x100, "Linux AI_ALL (0x10) moves to Darwin 0x100");
-    Check(AddrInfoFlagsToHost(0x20) == 0x400, "Linux AI_ADDRCONFIG (0x20) moves to Darwin 0x400");
+    Check(AddrInfoFlagsToHost(0x8) == 0x1000, "Bionic AI_NUMERICSERV maps to Darwin numeric service");
+    Check(AddrInfoFlagsToHost(0x800) == 0x800, "Bionic AI_V4MAPPED preserves Darwin value");
+    Check(AddrInfoFlagsToHost(0x100) == 0x100, "Bionic AI_ALL preserves Darwin value");
+    Check(AddrInfoFlagsToHost(0x400) == 0x400, "Bionic AI_ADDRCONFIG preserves Darwin value");
     Check(AddrInfoFlagsToHost(0x1 | 0x2 | 0x4) == (0x1 | 0x2 | 0x4),
           "AI_PASSIVE, AI_CANONNAME, and AI_NUMERICHOST keep their values");
-    Check(AddrInfoFlagsToHost(0x400 | 0x2) == (0x1000 | 0x2), "flags combine");
+    Check(AddrInfoFlagsToHost(0x8 | 0x2) == (0x1000 | 0x2), "Bionic resolver flags combine");
+    Check(AddrInfoFlagsToHost(0x200) == 0x200 && AddrInfoFlagsToHost(0x1000) == -1,
+          "mapped-address configuration retained and unknown Bionic flags rejected");
+    Check(AddrInfoFlagsToLinux(0x8 | 0x400 | 0x800 | 0x100) == (0x400 | 0x20 | 0x8 | 0x10),
+          "Bionic resolver flags translate to glibc for host verification");
+    Check(NameInfoFlagsToLinux(0x2 | 0x8) == (0x1 | 0x2), "Bionic numeric reverse-lookup flags translate");
+    Check(AddrInfoErrorToGuest(-2) == 8 && AddrInfoErrorToGuest(-3) == 2
+              && AddrInfoErrorToGuest(-12) == 14, "glibc failures translate to positive Bionic EAI codes");
+    Check(AddrInfoErrorToLinux(8) == -2 && AddrInfoErrorToLinux(3) == -1,
+          "Bionic resolver errors translate for host error descriptions");
 
     {
         char name[] = "example.test";

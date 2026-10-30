@@ -1,4 +1,5 @@
 #include "kudroid/kuart/DexClassLinker.h"
+#include "kudroid/kuart/Interpreter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -114,12 +115,15 @@ void DexClassLinker::SetMissingClassLogPath(const char* path) {
     }
 }
 
-DexClassLinker::DexClassLinker() = default;
-DexClassLinker::~DexClassLinker() = default;
+DexClassLinker::DexClassLinker() {
+    for (auto& entry : registered_class_cache_) entry.store(nullptr, std::memory_order_relaxed);
+}
+DexClassLinker::~DexClassLinker() { ClearFastResolutionCaches(); }
 
 bool DexClassLinker::AddDexFile(const uint8_t* bytes, size_t size,
                                 const std::string& location, std::string* error_msg,
                                 bool boot_class_path) {
+    std::lock_guard<std::recursive_mutex> load_lock(class_load_mutex_);
     const art::DexFileLoader loader;
     std::string local_error;
     std::unique_ptr<const art::DexFile> dex_file = loader.Open(
@@ -180,7 +184,33 @@ DexClass* DexClassLinker::CreateArrayClass(const char* descriptor) {
 }
 
 DexClass* DexClassLinker::FindClass(const char* descriptor) {
+    return FindClassImpl(descriptor, true);
+}
+
+DexMethod* DexClassLinker::FindResolvedMethod(const art::DexFile* dex, uint32_t method_idx,
+                                              bool is_static) {
+    if (dex == nullptr) return nullptr;
+    const ResolvedMethodKey key{dex, method_idx, is_static};
+    std::lock_guard<std::mutex> lock(resolved_methods_mutex_);
+    auto it = resolved_methods_.find(key);
+    return it != resolved_methods_.end() ? it->second : nullptr;
+}
+
+void DexClassLinker::CacheResolvedMethod(const art::DexFile* dex, uint32_t method_idx,
+                                         bool is_static, DexMethod* method) {
+    if (dex == nullptr || method == nullptr) return;
+    const ResolvedMethodKey key{dex, method_idx, is_static};
+    std::lock_guard<std::mutex> lock(resolved_methods_mutex_);
+    resolved_methods_[key] = method;
+}
+
+DexClass* DexClassLinker::FindClassNoStub(const char* descriptor) {
+    return FindClassImpl(descriptor, false);
+}
+
+DexClass* DexClassLinker::FindClassImpl(const char* descriptor, bool allow_stub) {
     if (descriptor == nullptr || descriptor[0] == '\0') return nullptr;
+    std::lock_guard<std::recursive_mutex> load_lock(class_load_mutex_);
 
     auto it = classes_.find(descriptor);
     if (it != classes_.end()) return it->second;
@@ -241,7 +271,8 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
     };
 
     const size_t descLen = std::strlen(descriptor);
-    if (isBootClasspathDescriptor(descriptor) && descLen > 2 && descriptor[descLen - 1] == ';') {
+    if (allow_stub && isBootClasspathDescriptor(descriptor) && descLen > 2 &&
+        descriptor[descLen - 1] == ';') {
         static std::mutex s_log_mtx;
         static std::set<std::string> s_logged_classes;
         {
@@ -433,13 +464,15 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
 
 bool DexClassLinker::LinkClass(DexClass* klass) {
     if (klass == nullptr) return false;
+    if (klass->status == DexClass::Status::kError) return false;
     if (klass->status == DexClass::Status::kLinked ||
         klass->status == DexClass::Status::kInitialized) {
         return true;
     }
 
-    if (klass->superclass != nullptr) {
-        LinkClass(klass->superclass);
+    if (klass->superclass != nullptr && !LinkClass(klass->superclass)) {
+        klass->status = DexClass::Status::kError;
+        return false;
     }
 
     // Lay out fields after the parent, largest first for natural alignment.
@@ -535,6 +568,14 @@ DexString* DexClassLinker::InternString(const char* utf8) {
     return str;
 }
 
+DexString* DexClassLinker::InternString(const std::string& utf8) {
+    auto existing = strings_.find(utf8);
+    if (existing != strings_.end()) return existing->second;
+    DexString* string = NewString(utf8);
+    if (string) strings_[utf8] = string;
+    return string;
+}
+
 DexString* DexClassLinker::NewString(const char* utf8) {
     if (utf8 == nullptr) return nullptr;
     DexClass* string_class = FindClass("Ljava/lang/String;");
@@ -551,6 +592,24 @@ DexString* DexClassLinker::NewString(const char* utf8) {
         }
     }
     str->ascii = ascii;    return str;
+}
+
+DexString* DexClassLinker::NewString(const std::string& utf8) {
+    DexClass* stringClass = FindClass("Ljava/lang/String;");
+    void* memory = heap_.Allocate(sizeof(DexString));
+    char* bytes = static_cast<char*>(heap_.Allocate(utf8.size() + 1));
+    if (!memory || !bytes) return nullptr;
+    std::memcpy(bytes, utf8.data(), utf8.size());
+    bytes[utf8.size()] = '\0';
+    auto* string = new (memory) DexString();
+    string->clazz = stringClass;
+    string->utf8 = bytes;
+    string->length = static_cast<uint32_t>(utf8.size());
+    string->ascii = true;
+    for (unsigned char byte : utf8) {
+        if (byte >= 0x80) { string->ascii = false; break; }
+    }
+    return string;
 }
 
 DexClassObject* DexClassLinker::GetClassObject(DexClass* klass) {
@@ -576,10 +635,15 @@ DexClass* DexClassLinker::ClassFromObject(DexObject* obj) const {
 
 bool DexClassLinker::IsRegisteredClass(const DexClass* klass) const {
     if (klass == nullptr) return false;
-    return live_classes_.count(klass) != 0;
+    const size_t slot = (reinterpret_cast<uintptr_t>(klass) >> 4) % registered_class_cache_.size();
+    if (registered_class_cache_[slot].load(std::memory_order_relaxed) == klass) return true;
+    if (live_classes_.count(klass) == 0) return false;
+    registered_class_cache_[slot].store(klass, std::memory_order_relaxed);
+    return true;
 }
 
 DexClass* DexClassLinker::GetOrCreateProxyClass(const std::vector<DexClass*>& interfaces) {
+    std::lock_guard<std::recursive_mutex> load_lock(class_load_mutex_);
     DexClass* proxy_base = FindClass("Ljava/lang/reflect/Proxy;");
     if (proxy_base == nullptr) {
         last_error_ = "java.lang.reflect.Proxy is missing from the framework";

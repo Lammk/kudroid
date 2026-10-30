@@ -60,10 +60,7 @@ jint JNICALL NatFourInts(JNIEnv*, jclass, jint a, jint b, jint c, jint d) {
 
 // Six integer args: JNIEnv* + jclass + 6 == 8 GP registers. Fits AAPCS64
 // (x0-x7), which is the product target, but overflows SysV x86-64 (6 GP) where
-// the host tests run. The assertion below is written against kJniGpRegs so the
-// same test pins the correct behaviour on both: a real call on arm64, a loud
-// failure on x86-64. The old code capped at 6 ARGUMENTS regardless of ABI and so
-// rejected this even on arm64 where it is perfectly callable.
+// the host tests run. The call must still deliver the excess on the stack.
 jint JNICALL NatSixInts(JNIEnv*, jclass, jint a, jint b, jint c, jint d, jint e, jint f) {
     return a + b + c + d + e + f;
 }
@@ -300,24 +297,18 @@ int main() {
               .i == 10,
           "fourInts(1..4) == 10 (6 GP registers: fits both ABIs)");
 
-    // JNIEnv* and jclass occupy two GP registers, so the integer budget is
-    // kJniGpRegs - 2. sixInts needs 8 GP: callable on AAPCS64, past the limit on
-    // SysV x86-64. Either way the behaviour must be defined — never a silent 0.
+    // JNIEnv* and jclass occupy two GP registers, so six integer arguments
+    // overflow every supported ABI (AAPCS64 has 8 GP registers, SysV x86-64 has
+    // 6). The excess must travel on the stack, not be dropped.
     {
-        const bool fits = kudroid::kuart::kJniGpRegs >= 8;
         interp.ClearPendingException();
         kudroid::kuart::DexMethod* m = klass->FindDirectMethod("sixInts", "(IIIIII)I");
         Check(m != nullptr, "found sixInts");
         std::vector<DexValue> args = {DexValue::Int(1), DexValue::Int(2), DexValue::Int(3),
                                       DexValue::Int(4), DexValue::Int(5), DexValue::Int(6)};
         const DexValue r = interp.Execute(m, args.data(), args.size());
-        if (fits) {
-            Check(!interp.HasPendingException() && r.i == 21,
-                  "sixInts(1..6) == 21 (8 GP registers, AAPCS64)");
-        } else {
-            Check(interp.HasPendingException(),
-                  "sixInts needs stack args on this ABI -> throws, never returns 0");
-        }
+        Check(!interp.HasPendingException() && r.i == 21,
+              "sixInts(1..6) == 21 (stack-passed arguments)");
         interp.ClearPendingException();
     }
 

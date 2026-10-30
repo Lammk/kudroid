@@ -75,9 +75,11 @@ public final class String implements CharSequence, Comparable<String> {
 
     public native String replace(CharSequence target, CharSequence replacement);
 
-    public native String toLowerCase();
+    public String toLowerCase() { return toLowerCase(java.util.Locale.getDefault()); }
+    public native String toLowerCase(java.util.Locale locale);
 
-    public native String toUpperCase();
+    public String toUpperCase() { return toUpperCase(java.util.Locale.getDefault()); }
+    public native String toUpperCase(java.util.Locale locale);
 
     public native String trim();
 
@@ -88,6 +90,13 @@ public final class String implements CharSequence, Comparable<String> {
     public native String intern();
 
     public native byte[] getBytes();
+    public byte[] getBytes(java.nio.charset.Charset charset) {
+        if (charset == null) throw new NullPointerException("charset");
+        java.nio.ByteBuffer buffer = charset.encode(this);
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        return bytes;
+    }
 
     public native char[] toCharArray();
 
@@ -187,8 +196,14 @@ public final class String implements CharSequence, Comparable<String> {
         }
     }
 
-    public byte[] getBytes(String charsetName) {
-        return getBytes();
+    public byte[] getBytes(String charsetName) throws java.io.UnsupportedEncodingException {
+        if (charsetName == null) throw new NullPointerException("charsetName");
+        java.nio.charset.Charset charset;
+        try { charset = java.nio.charset.Charset.forName(charsetName); }
+        catch (IllegalArgumentException error) {
+            throw new java.io.UnsupportedEncodingException(charsetName);
+        }
+        return getBytes(charset);
     }
 
     public String[] split(String regex) {

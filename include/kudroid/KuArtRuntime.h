@@ -5,6 +5,7 @@
 
 #include <jni.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -125,6 +126,8 @@ void kuart_post_touch_event_ex(int action, int pointerCount, const int* pointerI
 int kuart_touch_drain_pending(void);
 void kuart_post_surface_changed(void);
 void kuart_surface_drain_pending(void);
+void kuart_post_dark_mode(int is_dark);
+void kuart_dark_mode_drain_pending(void);
 
 // Hand pending camera frames, photos and errors to the guest. Main Looper thread only.
 void kuart_camera_drain_pending(void);
@@ -185,6 +188,7 @@ void kuart_dispatch_text_input(const char* utf8);
 // Backspace from the host keyboard. Separate from text input because it deletes
 // relative to the cursor rather than inserting.
 void kuart_dispatch_delete_backward(void);
+void kuart_dispatch_key_event(int action, int keyCode, int64_t downTimeNanos, int64_t eventTimeNanos);
 
 // Deliver the outcome of Activity.requestPermissions to the Activity on the Looper
 // thread. `permissionsCsv` and `resultsCsv` are parallel, comma-separated lists; each

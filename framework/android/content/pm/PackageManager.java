@@ -23,6 +23,33 @@ public abstract class PackageManager {
      */
     public static final int GET_META_DATA = 128;
 
+    public static final int COMPONENT_ENABLED_STATE_DEFAULT = 0;
+    public static final int COMPONENT_ENABLED_STATE_ENABLED = 1;
+    public static final int COMPONENT_ENABLED_STATE_DISABLED = 2;
+    public static final int COMPONENT_ENABLED_STATE_DISABLED_USER = 3;
+    public static final int COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED = 4;
+    public static final int DONT_KILL_APP = 0x00000001;
+    public static final int SYNCHRONOUS = 0x00000004;
+
+    private final java.util.HashMap<String, Integer> mComponentStates =
+            new java.util.HashMap<String, Integer>();
+
+    /** Recorded for the life of the process; nothing else consults it. */
+    public void setComponentEnabledSetting(ComponentName componentName, int newState, int flags) {
+        if (componentName == null) return;
+        synchronized (mComponentStates) {
+            mComponentStates.put(componentName.flattenToString(), newState);
+        }
+    }
+
+    public int getComponentEnabledSetting(ComponentName componentName) {
+        if (componentName == null) return COMPONENT_ENABLED_STATE_DEFAULT;
+        synchronized (mComponentStates) {
+            final Integer state = mComponentStates.get(componentName.flattenToString());
+            return state != null ? state : COMPONENT_ENABLED_STATE_DEFAULT;
+        }
+    }
+
     public static final int PERMISSION_GRANTED = 0;
     public static final int PERMISSION_DENIED = -1;
 

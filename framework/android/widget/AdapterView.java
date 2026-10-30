@@ -23,7 +23,15 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     private OnItemLongClickListener mOnItemLongClickListener;
     private OnItemSelectedListener mOnItemSelectedListener;
 
-    public AdapterView(Context context) { super(context); }
+    public AdapterView(Context context) { this(context, null); }
+    public AdapterView(Context context, android.util.AttributeSet attrs) { this(context, attrs, 0); }
+    public AdapterView(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+    public AdapterView(Context context, android.util.AttributeSet attrs, int defStyleAttr,
+            int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+    }
     public abstract T getAdapter();
     public abstract void setAdapter(T adapter);
     public void setOnItemClickListener(OnItemClickListener listener) { mOnItemClickListener = listener; }

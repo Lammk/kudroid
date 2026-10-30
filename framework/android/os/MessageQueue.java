@@ -165,6 +165,8 @@ public final class MessageQueue {
      * Returns the next message ready to be executed, or null if the queue is quitting.
      */
     Message next() {
+        // Host events must also enter the queue while Java messages stay ready.
+        if (mPtr != 0) nativeDrainInput(mPtr);
         // Idle handlers run at most once per wakeup: without this a
         // staying-registered handler re-runs every loop with no wait in
         // between (spin). The flag resets on every wait below.
@@ -343,6 +345,26 @@ public final class MessageQueue {
                 }
                 p = n;
             }
+        }
+    }
+
+    boolean hasMessages(Handler h, int what, Object object) {
+        if (h == null) return false;
+        synchronized (this) {
+            for (Message p = mMessages; p != null; p = p.next) {
+                if (p.target == h && p.what == what && (object == null || p.obj == object)) return true;
+            }
+            return false;
+        }
+    }
+
+    boolean hasCallbacks(Handler h, Runnable r) {
+        if (h == null || r == null) return false;
+        synchronized (this) {
+            for (Message p = mMessages; p != null; p = p.next) {
+                if (p.target == h && p.callback == r) return true;
+            }
+            return false;
         }
     }
 

@@ -71,6 +71,12 @@ KUDROID_VARARG_TRAMPOLINE kudroid_printf_trampoline, kudroid_printf_from_registe
 KUDROID_VARARG_TRAMPOLINE kudroid_fprintf_chk_trampoline, kudroid_fprintf_chk_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_printf_chk_trampoline, kudroid_printf_chk_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_syslog_trampoline, kudroid_syslog_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_asprintf_trampoline, kudroid_asprintf_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_asprintf_chk_trampoline, kudroid_asprintf_chk_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_dprintf_trampoline, kudroid_dprintf_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_dprintf_chk_trampoline, kudroid_dprintf_chk_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_log_buf_print_trampoline, kudroid_log_buf_print_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_syslog_chk_trampoline, kudroid_syslog_chk_from_registers
 /* scanf takes OUTPUT pointers as its varargs, so the same capture is needed for the
  * opposite reason: not to read the arguments correctly, but to write through the right
  * addresses. Forwarding to the host's sscanf made it store to stack words that were never

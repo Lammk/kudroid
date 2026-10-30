@@ -1,5 +1,8 @@
 package java.util.concurrent.atomic;
 
+import java.util.function.LongUnaryOperator;
+import java.util.function.LongBinaryOperator;
+
 public class AtomicLong extends Number {
 
     private volatile long value;
@@ -15,11 +18,11 @@ public class AtomicLong extends Number {
         return value;
     }
 
-    public final void set(long newValue) {
+    public final synchronized void set(long newValue) {
         value = newValue;
     }
 
-    public final void lazySet(long newValue) {
+    public final synchronized void lazySet(long newValue) {
         value = newValue;
     }
 
@@ -82,5 +85,59 @@ public class AtomicLong extends Number {
 
     public String toString() {
         return Long.toString(value);
+    }
+
+    public final long getAndUpdate(LongUnaryOperator f) {
+        long prev, next;
+        do {
+            prev = get();
+            next = f.applyAsLong(prev);
+        } while (!compareAndSet(prev, next));
+        return prev;
+    }
+
+    public final long updateAndGet(LongUnaryOperator f) {
+        long prev, next;
+        do {
+            prev = get();
+            next = f.applyAsLong(prev);
+        } while (!compareAndSet(prev, next));
+        return next;
+    }
+
+    public final long getAndAccumulate(long x, LongBinaryOperator f) {
+        long prev, next;
+        do {
+            prev = get();
+            next = f.applyAsLong(prev, x);
+        } while (!compareAndSet(prev, next));
+        return prev;
+    }
+
+    public final long accumulateAndGet(long x, LongBinaryOperator f) {
+        long prev, next;
+        do {
+            prev = get();
+            next = f.applyAsLong(prev, x);
+        } while (!compareAndSet(prev, next));
+        return next;
+    }
+
+    public final long getPlain() { return get(); }
+    public final void setPlain(long newValue) { set(newValue); }
+    public final long getOpaque() { return get(); }
+    public final void setOpaque(long newValue) { set(newValue); }
+    public final long getAcquire() { return get(); }
+    public final void setRelease(long newValue) { set(newValue); }
+    public final synchronized long compareAndExchange(long expect, long update) {
+        long witness = get();
+        if (witness == expect) set(update);
+        return witness;
+    }
+    public final boolean weakCompareAndSetPlain(long expect, long update) {
+        return compareAndSet(expect, update);
+    }
+    public final boolean weakCompareAndSet(long expect, long update) {
+        return compareAndSet(expect, update);
     }
 }

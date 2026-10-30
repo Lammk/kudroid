@@ -9,6 +9,10 @@ struct CrashInfo: Identifiable {
 
 class AppSession: ObservableObject {
     @Published var activeGuestApp: String = ""
+    @Published var shortcutLaunch: ShortcutLaunchModel?
+    @Published var shortcutError: String?
+    @Published var libraryBusy = false
+    @Published var libraryDeletionInProgress = false
     @Published var crashInfo: CrashInfo? = nil
     @Published var isSoRunning: Bool = false
     @Published var soRunningTitle: String = ""
@@ -37,115 +41,40 @@ final class SharedMetalContainer {
     }
 }
 
-// Keep every pointer alive until its release has reached the guest.
-final class TouchPointerTracker {
-    typealias Pointer = (id: Int32, x: Float, y: Float)
-    typealias Batch = (action: Int32, primary: Int32, pointers: [Pointer])
-
-    private var ids: [ObjectIdentifier: Int32] = [:]
-    // Retain tracked touches so a missing contact cannot share a reused object address.
-    private var contacts: [ObjectIdentifier: UITouch] = [:]
-    private var order: [ObjectIdentifier] = []
-    private var positions: [ObjectIdentifier: (x: Float, y: Float)] = [:]
-    private var reconciliations = 0
-
-    var isEmpty: Bool { ids.isEmpty }
-
-    func begin(_ touch: UITouch) -> Int32? {
-        let key = ObjectIdentifier(touch)
-        if let id = ids[key] { return id }
-        let used = Set(ids.values)
-        guard let assigned = (Int32(0)..<32).first(where: { !used.contains($0) }) else { return nil }
-        ids[key] = assigned
-        contacts[key] = touch
-        order.append(key)
-        return assigned
-    }
-
-    private func end(_ key: ObjectIdentifier) {
-        order.removeAll { $0 == key }
-        ids.removeValue(forKey: key)
-        contacts.removeValue(forKey: key)
-        positions.removeValue(forKey: key)
-    }
-
-    func activePointers(live: Set<UITouch>, in view: UIView, scale: CGFloat) -> [Pointer] {
-        for touch in live {
-            let key = ObjectIdentifier(touch)
-            guard ids[key] != nil else { continue }
-            let location = touch.location(in: view)
-            positions[key] = (Float(location.x * scale), Float(location.y * scale))
-        }
-        return order.compactMap { key in
-            guard let id = ids[key], let position = positions[key] else { return nil }
-            return (id, position.x, position.y)
-        }
-    }
-
-    func cancel() -> Batch? {
-        let pointers: [Pointer] = order.compactMap { key in
-            guard let id = ids[key], let position = positions[key] else { return nil }
-            return (id, position.x, position.y)
-        }
-        ids.removeAll()
-        contacts.removeAll()
-        order.removeAll()
-        positions.removeAll()
-        guard let first = pointers.first else { return nil }
-        return (3, first.id, pointers)
-    }
-
-    // Missing contacts must leave through UP/CANCEL before their ids can be reused.
-    func reconcile(live: Set<UITouch>, current: Set<UITouch>, in view: UIView,
-                   scale: CGFloat) -> [Batch] {
-        _ = activePointers(live: live.union(current), in: view, scale: scale)
-        var keep = Set(current.map { ObjectIdentifier($0) })
-        for touch in live where touch.phase != .ended && touch.phase != .cancelled {
-            keep.insert(ObjectIdentifier(touch))
-        }
-        let missing = order.filter { !keep.contains($0) }
-        guard !missing.isEmpty else { return [] }
-        if reconciliations < 20 {
-            reconciliations += 1
-            NSLog("[KuDroidTouch] releasing missing contacts=%d tracked=%d", missing.count, ids.count)
-        }
-        if missing.count == ids.count { return cancel().map { [$0] } ?? [] }
-        var batches: [Batch] = []
-        for key in missing {
-            if let id = ids[key] {
-                let pointers = activePointers(live: live, in: view, scale: scale)
-                batches.append((pointers.count > 1 ? 6 : 1, id, pointers))
-            }
-            end(key)
-        }
-        return batches
-    }
-
-    func release(_ touches: Set<UITouch>, live: Set<UITouch>, in view: UIView,
-                 scale: CGFloat, cancelled: Bool) -> [Batch] {
-        var batches = reconcile(live: live, current: touches, in: view, scale: scale)
-        let keys = Set(touches.map { ObjectIdentifier($0) })
-        let leaving = order.filter { keys.contains($0) }
-        guard !leaving.isEmpty else { return batches }
-        if cancelled && leaving.count == ids.count {
-            if let batch = cancel() { batches.append(batch) }
-            return batches
-        }
-        for key in leaving {
-            if let id = ids[key] {
-                let pointers = activePointers(live: live.union(touches), in: view, scale: scale)
-                batches.append((pointers.count > 1 ? 6 : 1, id, pointers))
-            }
-            end(key)
-        }
-        return batches
-    }
-}
-
 // Share the same gesture lifecycle across rendering backends.
 class GuestTouchView: UIView {
+    var guestDisplayScale: CGFloat { window?.screen.scale ?? UIScreen.main.scale }
+    var guestDrawableSize: CGSize {
+        let scale = guestDisplayScale
+        return CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
+    }
     private let touchTracker = TouchPointerTracker()
     private var inactiveObserver: NSObjectProtocol?
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        reportSafeAreaInsets()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        reportSafeAreaInsets()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        reportSafeAreaInsets()
+    }
+
+    private func reportSafeAreaInsets() {
+        guard window != nil else { return }
+        let scale = guestDisplayScale
+        let edges = safeAreaInsets
+        kudroid_set_safe_area_insets(Int32((edges.left * scale).rounded()),
+                                    Int32((edges.top * scale).rounded()),
+                                    Int32((edges.right * scale).rounded()),
+                                    Int32((edges.bottom * scale).rounded()))
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -252,10 +181,11 @@ class GlobalMetalView: GuestTouchView {
     override func layoutSubviews() {
         super.layoutSubviews()
         if let metalLayer = self.layer as? CAMetalLayer {
-            let scale = UIScreen.main.scale
+            let scale = guestDisplayScale
             metalLayer.contentsScale = scale
-            let w = Int(self.bounds.width * scale)
-            let h = Int(self.bounds.height * scale)
+            let size = guestDrawableSize
+            let w = Int(size.width)
+            let h = Int(size.height)
             if w > 0 && h > 0 {
                 metalLayer.drawableSize = CGSize(width: w, height: h)
                 kudroid_set_metal_layer(Unmanaged.passUnretained(metalLayer).toOpaque(), Int32(w), Int32(h), Float(scale))
@@ -287,10 +217,11 @@ private struct GuestEdgeGestures: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 16.0, *) {
             content
+                .statusBar(hidden: true)
                 .defersSystemGestures(on: .all)
                 .persistentSystemOverlays(.hidden)
         } else {
-            content
+            content.statusBar(hidden: true)
         }
     }
 }
@@ -299,17 +230,24 @@ private struct GuestEdgeGestures: ViewModifier {
 @available(iOS 15.0, *)
 struct KuDroidApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @AppStorage("shellAppearance") private var appearance = ShellAppearance.system.rawValue
     @StateObject private var session = AppSession()
+    @ObservedObject private var dataReset = AppDataResetModel.shared
+    @ObservedObject private var installer = APKInstallModel.shared
+    @StateObject private var documentImport = ExternalAPKImportModel()
 
     init() {
         if StandaloneConfiguration.isStandalone,
            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
             kudroid_set_log_paths(documents.path, StandaloneStorage.logs.path)
+        } else if !StandaloneConfiguration.isStandalone {
+            setupLogDir()
         }
         IOSDiagnostics.shared.start()
         IOSDiagnostics.shared.applicationPhase("app-init")
         activateAudioSession()
         KuDroidNetworkMonitor.shared.start()
+        KuDroidThermalMonitor.shared.start()
     }
 
     var body: some Scene {
@@ -318,9 +256,20 @@ struct KuDroidApp: App {
                 if StandaloneConfiguration.isStandalone {
                     StandaloneGuestView()
                         .modifier(GuestEdgeGestures())
+                } else if dataReset.busy {
+                    ZStack {
+                        Color.black.ignoresSafeArea()
+                        VStack(spacing: 16) { ProgressView(); Text("Deleting app data…") }
+                    }
+                } else if let launch = session.shortcutLaunch {
+                    ShortcutLaunchView(model: launch, run: {
+                        session.activeGuestApp = launch.appID
+                        session.shortcutLaunch = nil
+                    }, cancel: { session.shortcutLaunch = nil }).id(launch.id)
                 } else if !session.activeGuestApp.isEmpty {
                     DedicatedAppRunnerView(
                         appName: session.activeGuestApp,
+                        onEnded: { session.activeGuestApp = "" },
                         onCrash: { appName, tailLog in
                             session.activeGuestApp = ""
                             session.crashInfo = CrashInfo(appName: appName, tailLog: tailLog)
@@ -328,7 +277,6 @@ struct KuDroidApp: App {
                     )
                     .ignoresSafeArea()
                     .modifier(GuestEdgeGestures())
-                    .preferredColorScheme(.dark)
                     .environmentObject(session)
                 } else if session.isSoRunning {
                     ZStack {
@@ -361,6 +309,7 @@ struct KuDroidApp: App {
                             Spacer()
                         }
                     }
+                    .modifier(GuestEdgeGestures())
                     .transition(.opacity)
                     .zIndex(50)
                 } else {
@@ -368,6 +317,13 @@ struct KuDroidApp: App {
                         .environmentObject(session)
                 }
 
+                if installer.busy {
+                    Color.black.opacity(0.65).ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView()
+                        Text(installer.stage).multilineTextAlignment(.center)
+                    }.padding(28).background(Color(.systemGray6)).cornerRadius(18).padding()
+                }
                 if let crashInfo = session.crashInfo {
                     CrashAlertView(crashInfo: crashInfo) {
                         session.crashInfo = nil
@@ -376,8 +332,49 @@ struct KuDroidApp: App {
                     .zIndex(100)
                 }
             }
-            .preferredColorScheme(.dark)
+            .preferredColorScheme((ShellAppearance(rawValue: appearance) ?? .system).colorScheme)
+            .tint(ShellStyle.ink)
+            .alert("Could not install APK", isPresented: $installer.showError) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(installer.error) }
+            .sheet(isPresented: $documentImport.presented, onDismiss: { documentImport.cancel() }) {
+                ExternalAPKImportView(model: documentImport, installationAllowed: {
+                    session.activeGuestApp.isEmpty && !session.isSoRunning && !session.libraryBusy && !dataReset.busy
+                })
+            }
+            .alert("KuDroid", isPresented: Binding(get: { session.shortcutError != nil }, set: { if !$0 { session.shortcutError = nil } })) {
+                Button("OK", role: .cancel) { session.shortcutError = nil }
+            } message: { Text(session.shortcutError ?? "") }
+            .onOpenURL { url in
+                guard !StandaloneConfiguration.isStandalone else { return }
+                if APKFileTypes.accepts(url) {
+                    guard session.activeGuestApp.isEmpty, !session.isSoRunning,
+                          !session.libraryBusy, !dataReset.busy else {
+                        session.shortcutError = "Close the running app and wait for any file operation to finish before installing an APK."
+                        return
+                    }
+                    documentImport.open(url)
+                    return
+                }
+                guard !documentImport.presented,
+                      let id = InstalledAppStorage.id(from: url),
+                      !session.isSoRunning else { return }
+                guard !session.libraryBusy else {
+                    session.shortcutError = "Wait for the app installation or deletion to finish."
+                    return
+                }
+                guard session.activeGuestApp.isEmpty else {
+                    if session.activeGuestApp != id { session.shortcutError = "Close the current app before opening another app shortcut." }
+                    return
+                }
+                session.shortcutLaunch?.cancel()
+                session.shortcutLaunch = ShortcutLaunchModel(appID: id)
+            }
+            .onReceive(installer.$busy) { busy in
+                session.libraryBusy = busy || session.libraryDeletionInProgress
+            }
             .onAppear {
+                if !StandaloneConfiguration.isStandalone { dataReset.processStartup() }
                 IOSDiagnostics.shared.applicationPhase("window-on-appear")
                 RemoteDebugClient.shared.configure(session: session)
                 let savedIP = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
@@ -385,7 +382,6 @@ struct KuDroidApp: App {
                     RemoteDebugClient.shared.connect(host: savedIP)
                 }
             }
-            .animation(.easeInOut(duration: 0.25), value: session.activeGuestApp)
             .animation(.easeInOut(duration: 0.25), value: session.isSoRunning)
             .animation(.easeInOut(duration: 0.25), value: session.crashInfo != nil)
         }

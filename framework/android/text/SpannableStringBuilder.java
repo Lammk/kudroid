@@ -1,30 +1,25 @@
 package android.text;
 
-/**
- * android.text.SpannableStringBuilder — Editable based on StringBuilder.
- *
- * Doesn't support span yet (KuDroid doesn't have text styling), but all the internals are fixed
- * The content is real so the text editor app runs properly.
- *
- * Implements Spanned as well as Editable even though no spans are stored, because
- * that is the type an InputFilter is handed as its `dest`: a filter has to be able to
- * ask how long the buffer already is, and LengthFilter's whole calculation depends on
- * it. AOSP has Editable extend Spanned; declaring it here keeps filters working
- * without pulling in span storage KuDroid has no use for yet.
- */
-public class SpannableStringBuilder implements Editable, Spanned {
+/** Editable text retaining span ranges through insertions and deletions. */
+public class SpannableStringBuilder implements Editable, GetChars {
     private final StringBuilder mText;
+    private final SpanStore mSpans = new SpanStore();
 
     public SpannableStringBuilder() {
         mText = new StringBuilder();
     }
 
     public SpannableStringBuilder(CharSequence source) {
-        mText = new StringBuilder(source == null ? "" : source.toString());
+        this(source, 0, source.length());
     }
 
     public SpannableStringBuilder(CharSequence source, int start, int end) {
-        mText = new StringBuilder(source == null ? "" : source.subSequence(start, end).toString());
+        SpanStore.checkRange(start, end, source.length());
+        mText = new StringBuilder(source.toString().substring(start, end));
+        mSpans.copy(source, start, end, 0, true, this);
+    }
+    public static SpannableStringBuilder valueOf(CharSequence source) {
+        return source instanceof SpannableStringBuilder ? (SpannableStringBuilder) source : new SpannableStringBuilder(source);
     }
 
     public int length() {
@@ -36,59 +31,64 @@ public class SpannableStringBuilder implements Editable, Spanned {
     }
 
     public CharSequence subSequence(int start, int end) {
-        return mText.subSequence(start, end);
+        return new SpannableStringBuilder(this, start, end);
     }
+    public void getChars(int start, int end, char[] dest, int destoff) { mText.toString().getChars(start, end, dest, destoff); }
 
     @Override
     public String toString() {
         return mText.toString();
     }
 
-    public Editable replace(int st, int en, CharSequence source, int start, int end) {
-        CharSequence piece = source == null ? "" : source.subSequence(start, end);
+    public SpannableStringBuilder replace(int st, int en, CharSequence source, int start, int end) {
+        SpanStore.checkRange(st, en, length());
+        SpanStore.checkRange(start, end, source.length());
+        CharSequence piece = source.subSequence(start, end);
         piece = applyFilters(piece, st, en);
+        if (piece == this) piece = new SpannedString(piece);
+        mSpans.replace(st, en, piece.length(), this);
         mText.replace(st, en, piece.toString());
+        mSpans.copy(piece, 0, piece.length(), st, true, this);
         return this;
     }
 
-    public Editable replace(int st, int en, CharSequence text) {
-        CharSequence piece = text == null ? "" : text;
-        piece = applyFilters(piece, st, en);
-        mText.replace(st, en, piece.toString());
-        return this;
+    public SpannableStringBuilder replace(int st, int en, CharSequence text) {
+        return replace(st, en, text, 0, text.length());
     }
 
-    public Editable insert(int where, CharSequence text, int start, int end) {
+    public SpannableStringBuilder insert(int where, CharSequence text, int start, int end) {
         return replace(where, where, text, start, end);
     }
 
-    public Editable insert(int where, CharSequence text) {
+    public SpannableStringBuilder insert(int where, CharSequence text) {
         return replace(where, where, text);
     }
 
-    public Editable delete(int st, int en) {
-        mText.delete(st, en);
-        return this;
+    public SpannableStringBuilder delete(int st, int en) {
+        return replace(st, en, "");
     }
 
-    public Editable append(CharSequence text) {
-        // Through replace() rather than straight onto the builder, so an append is
-        // filtered like any other insertion. Appending past a LengthFilter's cap would
-        // otherwise bypass it entirely.
+    @Override
+    public SpannableStringBuilder append(CharSequence text) {
+        if (text == null) text = "null";
         return replace(mText.length(), mText.length(), text);
     }
 
-    public Editable append(CharSequence text, int start, int end) {
+    @Override
+    public SpannableStringBuilder append(CharSequence text, int start, int end) {
+        if (text == null) text = "null";
         return replace(mText.length(), mText.length(), text, start, end);
     }
 
-    public Editable append(char text) {
+    @Override
+    public SpannableStringBuilder append(char text) {
         return append(String.valueOf(text));
     }
 
     public void clear() {
-        mText.setLength(0);
+        replace(0, length(), "");
     }
+    public void clearSpans() { mSpans.clear(); }
 
     // Filters.
 
@@ -117,31 +117,34 @@ public class SpannableStringBuilder implements Editable, Spanned {
         return out;
     }
 
-    // Spanned: no span storage, so answer "no spans".
+    // Spans.
 
     @Override
-    public <T> T[] getSpans(int start, int end, Class<T> type) {
-        return (T[]) java.lang.reflect.Array.newInstance(type, 0);
+    public void setSpan(Object what, int start, int end, int flags) {
+        SpanStore.checkRange(start, end, length());
+        if (start == end && (flags & Spanned.SPAN_POINT_MARK_MASK) == Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) return;
+        mSpans.set(this, what, start, end, flags);
     }
 
     @Override
-    public int getSpanStart(Object tag) { return -1; }
+    public void removeSpan(Object what) { mSpans.remove(what); }
 
     @Override
-    public int getSpanEnd(Object tag) { return -1; }
+    public <T> T[] getSpans(int start, int end, Class<T> type) {
+        return mSpans.spans(start, end, type);
+    }
 
     @Override
-    public int getSpanFlags(Object tag) { return 0; }
+    public int getSpanStart(Object tag) { return mSpans.start(tag); }
 
-    /**
-     * The next index at which a span starts or ends.
-     *
-     * With no spans the only transition is the limit itself. Returning anything
-     * smaller would make a caller loop forever, since it advances to the value this
-     * returns and asks again.
-     */
+    @Override
+    public int getSpanEnd(Object tag) { return mSpans.end(tag); }
+
+    @Override
+    public int getSpanFlags(Object tag) { return mSpans.flags(tag); }
+
     @Override
     public int nextSpanTransition(int start, int limit, Class type) {
-        return limit;
+        return mSpans.transition(start, limit, type);
     }
 }

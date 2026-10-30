@@ -60,8 +60,14 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
         }
     };
 
-    public AbsListView(Context context) {
-        super(context);
+    public AbsListView(Context context) { this(context, null); }
+    public AbsListView(Context context, android.util.AttributeSet attrs) { this(context, attrs, 0); }
+    public AbsListView(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+    public AbsListView(Context context, android.util.AttributeSet attrs, int defStyleAttr,
+            int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
     }
 
     @Override
@@ -134,17 +140,6 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
     public long pointToRowId(int x, int y) {
         final int position = pointToPosition(x, y);
         return position == INVALID_POSITION ? INVALID_ROW_ID : getItemIdAtPosition(position);
-    }
-
-    @Override
-    public void draw(Canvas canvas) {
-        if (canvas == null || getVisibility() != View.VISIBLE) return;
-        super.draw(canvas);
-        final int n = getChildCount();
-        for (int i = 0; i < n; ++i) {
-            View child = getChildAt(i);
-            if (child != null) child.draw(canvas);
-        }
     }
 
     public interface SelectionBoundsAdjuster {

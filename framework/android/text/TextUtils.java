@@ -1,12 +1,43 @@
 package android.text;
 
 public class TextUtils {
+    /** Writes/reads a CharSequence as its text; spans are not carried. */
+    public static final android.os.Parcelable.Creator<CharSequence> CHAR_SEQUENCE_CREATOR =
+            new android.os.Parcelable.Creator<CharSequence>() {
+                @Override
+                public CharSequence createFromParcel(android.os.Parcel p) {
+                    return p.readString();
+                }
+
+                @Override
+                public CharSequence[] newArray(int size) {
+                    return new CharSequence[size];
+                }
+            };
+
+    public static void writeToParcel(CharSequence cs, android.os.Parcel p, int flags) {
+        p.writeString(cs != null ? cs.toString() : null);
+    }
+
     public enum TruncateAt {
         START,
         MIDDLE,
         END,
         MARQUEE,
         END_SMALL
+    }
+
+    /** View.LAYOUT_DIRECTION_RTL (1) for right-to-left scripts, else LTR (0). */
+    public static int getLayoutDirectionFromLocale(java.util.Locale locale) {
+        if (locale == null) return 0;
+        final String language = locale.getLanguage();
+        switch (language) {
+            case "ar": case "fa": case "he": case "iw": case "ur": case "yi":
+            case "ps": case "sd": case "ug": case "dv": case "ckb":
+                return 1;
+            default:
+                return 0;
+        }
     }
 
     public static boolean isEmpty(CharSequence str) {

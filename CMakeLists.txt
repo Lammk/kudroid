@@ -134,6 +134,7 @@ add_library(kudroid_core STATIC
     src/platform/AudioCapture.cpp
     src/platform/CameraShim.cpp
     src/platform/NetworkState.cpp
+    src/platform/ThermalShim.cpp
     src/platform/MediaShim.cpp
     src/platform/SurfaceTextureHost.cpp
     src/platform/MediaPlayerHost.cpp
@@ -224,6 +225,19 @@ target_compile_definitions(kudroid_core PRIVATE
     KUDROID_GIT_HASH="${KUDROID_GIT_HASH}"
 )
 
+# SQLite backs android.database.sqlite: the system library on Apple, the host's where the
+# tests run. A host without it builds the stub that reports the database as unavailable.
+if(APPLE)
+    target_link_libraries(kudroid_core PUBLIC sqlite3)
+    target_compile_definitions(kudroid_core PRIVATE KUDROID_HAVE_SQLITE3=1)
+else()
+    find_package(SQLite3 QUIET)
+    if(SQLite3_FOUND)
+        target_link_libraries(kudroid_core PUBLIC SQLite3::SQLite3)
+        target_compile_definitions(kudroid_core PRIVATE KUDROID_HAVE_SQLITE3=1)
+    endif()
+endif()
+
 find_path(MINIZIP_INCLUDE_DIR minizip/unzip.h)
 find_library(MINIZIP_LIBRARY NAMES minizip)
 if(MINIZIP_INCLUDE_DIR AND MINIZIP_LIBRARY)
@@ -255,6 +269,7 @@ if(APPLE)
         # macOS arm64 fail linker "Undefined symbols _CGBitmapContextCreate..."
         "-framework CoreGraphics"
         "-framework CoreText"
+        "-framework ImageIO"
         "-lobjc"
     )
 endif()
@@ -273,6 +288,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/KuDroidApp.swift
         ios-app/KuDroidShell/ContentView.swift
         ios-app/KuDroidShell/APKExport.swift
+        ios-app/KuDroidShell/AppActions.swift
+        ios-app/KuDroidShell/DocumentImport.swift
+        icon.png
         ios-app/KuDroidShell/ReverseHistory.swift
         ios-app/KuDroidShell/RemoteDebugClient.swift
         ios-app/KuDroidShell/IOSDiagnostics.swift
@@ -284,7 +302,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
     )
 
-    set_source_files_properties(ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
+    set_source_files_properties(icon.png ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
         PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     add_custom_command(TARGET KuDroidShell POST_BUILD
         COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_standalone_launcher.py"
@@ -552,6 +570,15 @@ else()
         target_include_directories(test_vfs PRIVATE include)
     endif()
 
+    add_executable(test_vfs_io tests/test_vfs_io.cpp)
+    target_link_libraries(test_vfs_io PRIVATE kudroid_core)
+    target_include_directories(test_vfs_io PRIVATE include)
+
+    find_package(Threads REQUIRED)
+    add_executable(test_thermal tests/test_thermal.cpp)
+    target_link_libraries(test_thermal PRIVATE kudroid_core Threads::Threads)
+    target_include_directories(test_thermal PRIVATE include)
+
     # IO trace for the audio thread: FMOD's own reads/seeks must be traced (and
     # only those), in both the FILE* layer and the fd layer.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_trace.cpp")
@@ -572,6 +599,9 @@ else()
     endif()
     add_executable(test_socket_abi tests/test_socket_abi.cpp src/abi/SocketAbi.cpp)
     target_include_directories(test_socket_abi PRIVATE include)
+    add_executable(test_resolver_abi tests/test_resolver_abi.cpp)
+    target_link_libraries(test_resolver_abi PRIVATE kudroid_core art_dex)
+    target_include_directories(test_resolver_abi PRIVATE include)
     add_executable(test_touch_event_queue tests/test_touch_event_queue.cpp)
     target_include_directories(test_touch_event_queue PRIVATE include)
     target_link_libraries(test_touch_event_queue PRIVATE Threads::Threads)
@@ -597,7 +627,7 @@ else()
     # test_kuart_exc try/catch table + <clinit>
     #   test_kuart_reflect  Class.forName/newInstance/invoke + java.lang.Class
     # test_kuart_filled_array  filled-new-array{,/range}: enum $values(), new T[]{..}
-    # test_kuart_jni_float     JNI float/double ABI (AAPCS64 v0-v7) + >6 args
+    # test_kuart_jni_float     JNI float/double ABI (AAPCS64 v0-v7) + stack args
     # test_kuart_stub          auto-stub policy: boot classpath only, stubs refuse use
     # test_kuart_framework     runs the real framework.dex: regex, java.text, Calendar
     # test_kuart_missing_field an unresolvable field must name itself, not say "iput"
@@ -670,6 +700,7 @@ else()
         test_kuart_missing_field
         test_kuart_thread_state
         test_kuart_vmlock
+        test_kuart_monitor
         test_kuart_prefs
         test_kuart_jit
         test_kuart_proxy
@@ -711,6 +742,7 @@ else()
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/MediaApiTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/ThrowableTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/FrameworkResourceTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/NumberFormatTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/AxmlBuilder.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/InflaterTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/StyleTests.java
@@ -724,6 +756,38 @@ else()
             DEPENDS ${KUART_JAVA_TEST_SOURCES} kudroid_framework_dex
             COMMENT "Building java.net test classes")
         add_custom_target(kuart_java_tests_dex DEPENDS "${KUART_JAVA_TEST_DEX}")
+
+        set(KUART_WINDOW_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TestSupport.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/WindowTraversalTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/ThemeBridgeTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/BackNavigationTests.java)
+        set(KUART_WINDOW_TEST_DEX "${CMAKE_BINARY_DIR}/kuart_window_tests.dex")
+        add_custom_command(OUTPUT "${KUART_WINDOW_TEST_DEX}"
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh "${KUART_WINDOW_TEST_DEX}" ${KUART_WINDOW_TEST_SOURCES}
+            DEPENDS ${KUART_WINDOW_TEST_SOURCES} kudroid_framework_dex
+            COMMENT "Building window traversal and appearance tests")
+        add_custom_target(kuart_window_tests_dex DEPENDS "${KUART_WINDOW_TEST_DEX}")
+        add_executable(test_kuart_window kuart-tests/test_kuart_window.cpp)
+        target_link_libraries(test_kuart_window PRIVATE kudroid_core art_dex)
+        target_include_directories(test_kuart_window PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_window PRIVATE KUART_WINDOW_TEST_DEX="${KUART_WINDOW_TEST_DEX}")
+        add_dependencies(test_kuart_window kuart_window_tests_dex)
+        set(KUART_UI_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TestSupport.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/AxmlBuilder.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/UiAbiTests.java)
+        set(KUART_UI_TEST_DEX "${CMAKE_BINARY_DIR}/kuart_ui_tests.dex")
+        add_custom_command(OUTPUT "${KUART_UI_TEST_DEX}"
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh "${KUART_UI_TEST_DEX}" ${KUART_UI_TEST_SOURCES}
+            DEPENDS ${KUART_UI_TEST_SOURCES} kudroid_framework_dex
+            COMMENT "Building UI ABI tests")
+        add_custom_target(kuart_ui_tests_dex DEPENDS "${KUART_UI_TEST_DEX}")
+        add_executable(test_kuart_ui kuart-tests/test_kuart_ui.cpp)
+        target_link_libraries(test_kuart_ui PRIVATE kudroid_core art_dex)
+        target_include_directories(test_kuart_ui PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_ui PRIVATE KUART_UI_TEST_DEX="${KUART_UI_TEST_DEX}")
+        add_dependencies(test_kuart_ui kuart_ui_tests_dex)
         add_executable(test_kuart_netjava kuart-tests/test_kuart_netjava.cpp)
         target_link_libraries(test_kuart_netjava PRIVATE kudroid_core art_dex ZLIB::ZLIB)
         target_include_directories(test_kuart_netjava PRIVATE include kuart-tests)

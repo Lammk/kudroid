@@ -1,10 +1,12 @@
 package android.graphics.drawable;
 
-/** Stub automatically generated for android.graphics.drawable.Animatable2 */
-public class Animatable2 {
-    public Animatable2() {}
+public interface Animatable2 extends Animatable {
+    void registerAnimationCallback(AnimationCallback callback);
+    boolean unregisterAnimationCallback(AnimationCallback callback);
+    void clearAnimationCallbacks();
 
-    public static class AnimationCallback {
-        public AnimationCallback() {}
+    public static abstract class AnimationCallback {
+        public void onAnimationStart(Drawable drawable) {}
+        public void onAnimationEnd(Drawable drawable) {}
     }
 }

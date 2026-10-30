@@ -15,11 +15,11 @@ public class AtomicBoolean {
         return value;
     }
 
-    public final void set(boolean newValue) {
+    public final synchronized void set(boolean newValue) {
         value = newValue;
     }
 
-    public final void lazySet(boolean newValue) {
+    public final synchronized void lazySet(boolean newValue) {
         value = newValue;
     }
 
@@ -43,5 +43,20 @@ public class AtomicBoolean {
 
     public String toString() {
         return Boolean.toString(value);
+    }
+
+    public final boolean getPlain() { return get(); }
+    public final void setPlain(boolean newValue) { set(newValue); }
+    public final boolean getOpaque() { return get(); }
+    public final void setOpaque(boolean newValue) { set(newValue); }
+    public final boolean getAcquire() { return get(); }
+    public final void setRelease(boolean newValue) { set(newValue); }
+    public final synchronized boolean compareAndExchange(boolean expect, boolean update) {
+        boolean witness = get();
+        if (witness == expect) set(update);
+        return witness;
+    }
+    public final boolean weakCompareAndSetPlain(boolean expect, boolean update) {
+        return compareAndSet(expect, update);
     }
 }

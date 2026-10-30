@@ -9,15 +9,19 @@ package android.graphics.drawable;
  *
  * Extends Drawable so it can be used wherever a background can, which the stub could not.
  */
-public class LayerDrawable extends Drawable {
+public class LayerDrawable extends Drawable implements Drawable.Callback {
     private final Drawable[] mLayers;
+    private final int[] mIds;
     private final int[] mInsetLeft;
     private final int[] mInsetTop;
     private final int[] mInsetRight;
     private final int[] mInsetBottom;
 
     public LayerDrawable(Drawable[] layers) {
-        mLayers = layers != null ? layers : new Drawable[0];
+        mLayers = layers != null ? layers.clone() : new Drawable[0];
+        for (Drawable layer : mLayers) if (layer != null) layer.setCallback(this);
+        mIds = new int[mLayers.length];
+        java.util.Arrays.fill(mIds, -1);
         mInsetLeft = new int[mLayers.length];
         mInsetTop = new int[mLayers.length];
         mInsetRight = new int[mLayers.length];
@@ -33,11 +37,46 @@ public class LayerDrawable extends Drawable {
     }
 
     public boolean setDrawableByLayerId(int id, Drawable drawable) {
-        return false;  // no layer ids without resource parsing
+        for (int i = mLayers.length - 1; i >= 0; i--) {
+            if (mIds[i] != id) continue;
+            if (mLayers[i] != null) mLayers[i].setCallback(null);
+            mLayers[i] = drawable;
+            if (drawable != null) {
+                drawable.setCallback(this);
+                android.graphics.Rect b = getBounds();
+                drawable.setBounds(b.left + mInsetLeft[i], b.top + mInsetTop[i],
+                        b.right - mInsetRight[i], b.bottom - mInsetBottom[i]);
+                drawable.setState(getState());
+            }
+            invalidateSelf();
+            return true;
+        }
+        return false;
     }
 
     public Drawable findDrawableByLayerId(int id) {
+        for (int i = mLayers.length - 1; i >= 0; i--)
+            if (mIds[i] == id) return mLayers[i];
         return null;
+    }
+
+    @Override public void invalidateDrawable(Drawable who) { invalidateSelf(); }
+    @Override public void scheduleDrawable(Drawable who, Runnable what, long when) {
+        scheduleSelf(what, when);
+    }
+    @Override public void unscheduleDrawable(Drawable who, Runnable what) { unscheduleSelf(what); }
+
+    public void setId(int index, int id) { mIds[index] = id; invalidateSelf(); }
+    public int getId(int index) { return mIds[index]; }
+
+    @Override public boolean isStateful() {
+        for (Drawable layer : mLayers) if (layer != null && layer.isStateful()) return true;
+        return false;
+    }
+    @Override protected boolean onStateChange(int[] states) {
+        boolean changed = false;
+        for (Drawable layer : mLayers) if (layer != null) changed |= layer.setState(states);
+        return changed;
     }
 
     public void setLayerInset(int index, int l, int t, int r, int b) {

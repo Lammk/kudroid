@@ -92,6 +92,91 @@ int32_t CompareLong(T a, T b) {
 
 }  // namespace
 
+// Multiple ways keep colliding call sites and receiver types cached.
+constexpr size_t kFastVirtualSets = 256;
+constexpr size_t kFastVirtualWays = 4;
+struct FastVirtualSlot {
+    const void* site = nullptr;
+    DexClass* receiver = nullptr;
+    DexMethod* target = nullptr;
+};
+struct FastVirtualSet {
+    FastVirtualSlot ways[kFastVirtualWays];
+    unsigned next = 0;
+};
+std::atomic<uint64_t> g_fastVirtualGeneration{1};
+thread_local uint64_t t_fastVirtualGeneration = 0;
+thread_local FastVirtualSet t_fastVirtualCache[kFastVirtualSets];
+
+constexpr size_t kFastFieldSets = 256;
+constexpr size_t kFastFieldWays = 4;
+struct FastFieldSlot {
+    const DexClassLinker* linker = nullptr;
+    const art::DexFile* dex = nullptr;
+    const DexClass* owner = nullptr;
+    uint32_t index = 0;
+    bool is_static = false;
+    DexField* field = nullptr;
+};
+struct FastFieldSet {
+    FastFieldSlot ways[kFastFieldWays];
+    unsigned next = 0;
+};
+thread_local uint64_t t_fastFieldGeneration = 0;
+thread_local FastFieldSet t_fastFieldCache[kFastFieldSets];
+
+constexpr size_t kFastTypeSlots = 512;
+struct FastTypeSlot {
+    const DexClassLinker* linker = nullptr;
+    const art::DexFile* dex = nullptr;
+    uint32_t index = 0;
+    DexClass* klass = nullptr;
+};
+thread_local uint64_t t_fastTypeGeneration = 0;
+thread_local FastTypeSlot t_fastTypeCache[kFastTypeSlots];
+
+constexpr size_t kFastMethodSlots = 1024;
+struct FastMethodSlot {
+    const DexClassLinker* linker = nullptr;
+    const art::DexFile* dex = nullptr;
+    const DexClass* owner = nullptr;
+    uint32_t index = 0;
+    bool is_static = false;
+    bool exact_owner = false;
+    DexMethod* method = nullptr;
+};
+thread_local uint64_t t_fastMethodGeneration = 0;
+thread_local FastMethodSlot t_fastMethodCache[kFastMethodSlots];
+
+void ClearFastResolutionCaches() { g_fastVirtualGeneration.fetch_add(1); }
+
+static FastVirtualSet& FastVirtualBucket(const void* site, const DexClass* receiver) {
+    uintptr_t key = (reinterpret_cast<uintptr_t>(site) >> 1)
+            ^ (reinterpret_cast<uintptr_t>(receiver) >> 4);
+    key ^= key >> 17;
+    return t_fastVirtualCache[key % kFastVirtualSets];
+}
+
+DexMethod* FastVirtualLookup(const void* site, DexClass* receiver) {
+    const uint64_t generation = g_fastVirtualGeneration.load(std::memory_order_relaxed);
+    if (t_fastVirtualGeneration != generation) {
+        std::fill_n(t_fastVirtualCache, kFastVirtualSets, FastVirtualSet{});
+        t_fastVirtualGeneration = generation;
+    }
+    const FastVirtualSet& bucket = FastVirtualBucket(site, receiver);
+    for (const FastVirtualSlot& entry : bucket.ways) {
+        if (entry.site == site && entry.receiver == receiver) return entry.target;
+    }
+    return nullptr;
+}
+
+void FastVirtualStore(const void* site, DexClass* receiver, DexMethod* target) {
+    if (target == nullptr) return;
+    FastVirtualSet& bucket = FastVirtualBucket(site, receiver);
+    bucket.ways[bucket.next] = FastVirtualSlot{site, receiver, target};
+    bucket.next = (bucket.next + 1) % kFastVirtualWays;
+}
+
 // ResolveMethod's stub + missing-log caches. Namespace scope (not
 // function-static) so ClearResolveCaches can drop them on shutdown: they are
 // keyed by DexClass* of the CURRENT heap, and serving them to the next app is
@@ -106,6 +191,7 @@ void ClearResolveCaches() {
     g_stubMethods.clear();
     g_loggedMissingMethods.clear();
     Interpreter::ClearBacktraceCaches();
+    ClearFastResolutionCaches();
 }
 
 thread_local DexObject* Interpreter::pending_exception_ = nullptr;
@@ -414,10 +500,22 @@ DexClass* Interpreter::ResolveClass(const DexMethod* context, uint32_t type_idx)
     // the uint16 truncation below would alias a large index onto an unrelated
     // type). Malformed dex resolves to null, which every caller already handles.
     if (type_idx >= context->dex_file->NumTypeIds()) return nullptr;
+    const uint64_t generation = g_fastVirtualGeneration.load(std::memory_order_relaxed);
+    if (t_fastTypeGeneration != generation) {
+        std::fill_n(t_fastTypeCache, kFastTypeSlots, FastTypeSlot{});
+        t_fastTypeGeneration = generation;
+    }
+    const size_t slot = ((reinterpret_cast<uintptr_t>(context->dex_file) >> 4)
+            ^ (type_idx * 31u)) % kFastTypeSlots;
+    const FastTypeSlot& cached = t_fastTypeCache[slot];
+    if (cached.index == type_idx && cached.dex == context->dex_file
+            && cached.linker == linker_) return cached.klass;
     const char* descriptor =
         context->dex_file->StringByTypeIdx(art::dex::TypeIndex(static_cast<uint16_t>(type_idx)));
     if (descriptor == nullptr) return nullptr;
-    return linker_->FindClass(descriptor);
+    DexClass* klass = linker_->FindClass(descriptor);
+    if (klass != nullptr) t_fastTypeCache[slot] = FastTypeSlot{linker_, context->dex_file, type_idx, klass};
+    return klass;
 }
 
 DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx,
@@ -425,10 +523,38 @@ DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx
     if (context == nullptr || context->dex_file == nullptr) return nullptr;
     const art::DexFile& dex_file = *context->dex_file;
     if (field_idx >= dex_file.NumFieldIds()) return nullptr;
+    // Keep resolved fields scoped to their DEX, executing class and runtime.
+    const uint64_t generation = g_fastVirtualGeneration.load(std::memory_order_relaxed);
+    if (t_fastFieldGeneration != generation) {
+        std::fill_n(t_fastFieldCache, kFastFieldSets, FastFieldSet{});
+        t_fastFieldGeneration = generation;
+    }
+    const size_t slot = ((reinterpret_cast<uintptr_t>(&dex_file) >> 3)
+            ^ (reinterpret_cast<uintptr_t>(context->declaring_class) >> 3)
+            ^ (field_idx * 31u) ^ static_cast<uint32_t>(is_static)) % kFastFieldSets;
+    FastFieldSet& bucket = t_fastFieldCache[slot];
+    for (const FastFieldSlot& cached : bucket.ways) {
+        if (cached.index == field_idx && cached.dex == &dex_file
+                && cached.owner == context->declaring_class && cached.linker == linker_
+                && cached.is_static == is_static) return cached.field;
+    }
     const art::dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
 
     const char* class_descriptor = dex_file.GetFieldDeclaringClassDescriptor(field_id);
-    DexClass* klass = linker_->FindClass(class_descriptor);
+    // Prefer the class actually reached from the executing method. The global
+    // descriptor map can contain a duplicate loaded by another thread; using it
+    // would read a different class's static sentinel while the object was built
+    // from this one.
+    DexClass* klass = nullptr;
+    if (context->declaring_class != nullptr) {
+        for (DexClass* c = context->declaring_class; c != nullptr; c = c->superclass) {
+            if (c->descriptor != nullptr && std::strcmp(c->descriptor, class_descriptor) == 0) {
+                klass = c;
+                break;
+            }
+        }
+    }
+    if (klass == nullptr) klass = linker_->FindClass(class_descriptor);
     if (klass == nullptr) return nullptr;
 
     const char* name = dex_file.GetFieldName(field_id);
@@ -437,6 +563,10 @@ DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx
                                 : klass->FindInstanceField(name, type);
     if (field == nullptr) {
         ReportMissingField(klass, name, type, is_static);
+    } else {
+        bucket.ways[bucket.next] = FastFieldSlot{linker_, &dex_file,
+                context->declaring_class, field_idx, is_static, field};
+        bucket.next = (bucket.next + 1) % kFastFieldWays;
     }
     return field;
 }
@@ -563,21 +693,8 @@ bool Interpreter::CheckInstanceField(DexObject* obj, DexField* field, uint32_t w
     }
     if (clazz == nullptr || field->declaring_class == nullptr ||
         !clazz->IsSubClassOf(field->declaring_class)) {
-        // Log once, do not throw: hierarchy bookkeeping (stub classes,
-        // unlinked superclasses during early linking) made legitimate boot
-        // accesses mismatch, and the NoSuchFieldError killed the init thread.
-        static std::mutex s_mtx;
-        static std::set<std::string> s_reported;
-        std::lock_guard<std::mutex> lock(s_mtx);
-        const std::string key = std::string(clazz && clazz->descriptor ? clazz->descriptor : "?") +
-                                "." + (field->name != nullptr ? field->name : "?");
-        if (s_reported.insert(key).second && clazz != nullptr && field->declaring_class != nullptr) {
-            std::fprintf(stderr,
-                         "[KuART][FIELD] offset check relaxed: %s not subclass of %s\n",
-                         clazz->descriptor ? clazz->descriptor : "?",
-                         field->declaring_class->descriptor ? field->declaring_class->descriptor : "?");
-        }
-        return true;
+        ThrowException("Ljava/lang/NoSuchFieldError;", "field does not belong to receiver class");
+        return false;
     }
     // object_size==0 means the layout was never computed (synthetic/test
     // classes): nothing to check against, so trust the offset. A computed
@@ -592,21 +709,62 @@ bool Interpreter::CheckInstanceField(DexObject* obj, DexField* field, uint32_t w
     return true;
 }
 
-DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx) {    if (context == nullptr || context->dex_file == nullptr) return nullptr;
+DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx,
+                                      bool is_static, bool exact_owner) {
+    if (context == nullptr || context->dex_file == nullptr) return nullptr;
     const art::DexFile& dex_file = *context->dex_file;
     if (method_idx >= dex_file.NumMethodIds()) return nullptr;
+    const uint64_t generation = g_fastVirtualGeneration.load(std::memory_order_relaxed);
+    if (t_fastMethodGeneration != generation) {
+        std::fill_n(t_fastMethodCache, kFastMethodSlots, FastMethodSlot{});
+        t_fastMethodGeneration = generation;
+    }
+    const size_t slot = ((reinterpret_cast<uintptr_t>(&dex_file) >> 3)
+            ^ (reinterpret_cast<uintptr_t>(context->declaring_class) >> 3)
+            ^ (method_idx * 31u) ^ (static_cast<uint32_t>(is_static) << 1)
+            ^ static_cast<uint32_t>(exact_owner)) % kFastMethodSlots;
+    const FastMethodSlot& cached = t_fastMethodCache[slot];
+    if (cached.linker == linker_ && cached.dex == &dex_file && cached.owner == context->declaring_class
+            && cached.index == method_idx && cached.is_static == is_static
+            && cached.exact_owner == exact_owner) return cached.method;
+    auto remember = [&](DexMethod* method) {
+        if (method != nullptr) t_fastMethodCache[slot] = FastMethodSlot{
+                linker_, &dex_file, context->declaring_class, method_idx, is_static, exact_owner, method};
+        return method;
+    };
+    if (!exact_owner) {
+        if (DexMethod* cached =
+                linker_->FindResolvedMethod(context->dex_file, method_idx, is_static)) {
+            return remember(cached);
+        }
+    }
     const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
 
     const char* class_descriptor =
         dex_file.StringByTypeIdx(art::dex::TypeIndex(method_id.class_idx_.index_));
-    DexClass* klass = linker_->FindClass(class_descriptor);
+    DexClass* klass = nullptr;
+    if (exact_owner && context->declaring_class != nullptr) {
+        for (DexClass* c = context->declaring_class; c != nullptr; c = c->superclass) {
+            if (c->descriptor != nullptr && std::strcmp(c->descriptor, class_descriptor) == 0) {
+                klass = c;
+                break;
+            }
+        }
+    }
+    if (klass == nullptr) klass = linker_->FindClass(class_descriptor);
     if (klass == nullptr) return nullptr;
 
     const char* name = dex_file.GetMethodName(method_id);
     const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
 
-    if (DexMethod* m = klass->FindDirectMethod(name, signature.c_str())) return m;
-    if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) return m;
+    if (DexMethod* m = klass->FindDirectMethod(name, signature.c_str())) {
+        if (!exact_owner) linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, m);
+        return remember(m);
+    }
+    if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) {
+        if (!exact_owner) linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, m);
+        return remember(m);
+    }
 
     auto isBootClasspathDescriptor = [](const char* desc) -> bool {
         if (!desc || desc[0] != 'L') return false;
@@ -625,28 +783,56 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
                 std::strncmp(desc, "Lorg/json/", 10) == 0);
     };
 
-    if (klass->dex_file == nullptr || isBootClasspathDescriptor(class_descriptor)) {
+    // An app class inherits from the framework: a method the framework lacks is looked up
+    // through the app subclass (invoke-virtual names the receiver's static type), so the
+    // owner in the reference is an app class even though the gap is in the framework.
+    auto inheritsFromFramework = [&]() -> bool {
+        for (const DexClass* c = klass->superclass; c != nullptr; c = c->superclass) {
+            const char* d = c->descriptor;
+            if (d == nullptr || std::strcmp(d, "Ljava/lang/Object;") == 0) continue;
+            if (std::strncmp(d, "Landroid/", 9) == 0 || std::strncmp(d, "Ljava/", 6) == 0 ||
+                std::strncmp(d, "Ljavax/", 7) == 0 || std::strncmp(d, "Ldalvik/", 8) == 0 ||
+                std::strncmp(d, "Lcom/android/", 13) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (klass->dex_file == nullptr || isBootClasspathDescriptor(class_descriptor) ||
+        inheritsFromFramework()) {
         std::lock_guard<std::mutex> lock(g_stubMethodMtx);
 
         std::string methodKey = std::string(class_descriptor) + "->" + name + signature;
         if (g_loggedMissingMethods.insert(methodKey).second) {
             std::fprintf(stderr, "[KuART][MISSING-METHOD] Auto-stubbing missing framework method: %s (dex index %u)\n",
                          methodKey.c_str(), method_idx);
+            DexClassLinker::LogMissingMember("MISSING_FRAMEWORK_METHOD", methodKey);
         }
 
         auto key = std::make_tuple(klass, std::string(name), signature);
         auto it = g_stubMethods.find(key);
-        if (it != g_stubMethods.end()) return it->second.get();
+        if (it != g_stubMethods.end()) {
+            DexMethod* cached = it->second.get();
+            if (!exact_owner) {
+                linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, cached);
+            }
+            return cached;
+        }
 
         auto stubM = std::make_unique<DexMethod>();
         stubM->name = name;
         // Signature must be recorded; null matches any overload by name.
         stubM->signature = linker_->heap().InternString(signature.c_str());
         stubM->declaring_class = klass;
-        stubM->access_flags = art::kAccPublic;
+        stubM->access_flags = art::kAccPublic |
+                              (is_static ? art::kAccStatic : 0);
         stubM->code_item = nullptr;
         DexMethod* res = stubM.get();
         g_stubMethods.emplace(std::move(key), std::move(stubM));
+        if (!exact_owner) {
+            linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, res);
+        }
         return res;
     }
     return nullptr;
@@ -733,12 +919,34 @@ bool Interpreter::InvokeProxyMethod(DexObject* proxy, DexMethod* method,
 bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
                               Instruction::Code opcode) {
     const uint32_t method_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
-    DexMethod* target = ResolveMethod(frame->method(), method_idx);
+    const bool is_static = opcode == Instruction::INVOKE_STATIC ||
+                           opcode == Instruction::INVOKE_STATIC_RANGE;
+    const bool exact_owner = opcode == Instruction::INVOKE_DIRECT ||
+                             opcode == Instruction::INVOKE_DIRECT_RANGE ||
+                             opcode == Instruction::INVOKE_SUPER ||
+                             opcode == Instruction::INVOKE_SUPER_RANGE;
+    DexMethod* target = ResolveMethod(frame->method(), method_idx, is_static, exact_owner);
     if (target == nullptr) {
         // Name the method; a raw DEX index alone cannot be acted on.
         ReportUnresolvableMethod(frame->method(), method_idx);
         ThrowException("Ljava/lang/NoSuchMethodError;",
                        DescribeMethodRef(frame->method(), method_idx));
+        return false;
+    }
+
+    // The receiver convention follows the opcode, not the target's flags. Running a
+    // static call through an instance method silently shifts every argument by one
+    // (the first argument becomes `this`), so reject the mismatch instead.
+    if (target->IsStatic() != is_static) {
+        std::string detail = is_static ? "invoke-static " : "invoke-instance ";
+        if (target->declaring_class != nullptr) {
+            detail += target->declaring_class->PrettyName();
+            detail += ".";
+        }
+        detail += target->name != nullptr ? target->name : "?";
+        if (target->signature != nullptr) detail += target->signature;
+        detail += is_static ? " resolved to an instance method" : " resolved to a static method";
+        ThrowException("Ljava/lang/NoSuchMethodError;", detail);
         return false;
     }
 
@@ -754,9 +962,6 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
         arg_count = inst->GetVarArgs(arg_regs);
     }
 
-    const bool is_static = opcode == Instruction::INVOKE_STATIC ||
-                           opcode == Instruction::INVOKE_STATIC_RANGE;
-
     // Static call triggers class initialization.
     if (is_static) {
         EnsureInitialized(target->declaring_class);
@@ -770,8 +975,16 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
             target->dex_file->GetMethodId(target->dex_method_index));
     }
 
-    std::vector<DexValue> args;
-    args.reserve(arg_count);
+    // Invocations overwhelmingly have a handful of arguments; keep the array on the
+    // stack and fall back to the heap only for wide signatures.
+    DexValue inline_args[8];
+    std::vector<DexValue> heap_args;
+    DexValue* args = inline_args;
+    size_t argc = 0;
+    if (arg_count > 8) {
+        heap_args.resize(arg_count);
+        args = heap_args.data();
+    }
 
     uint32_t slot = 0;
     const auto reg_at = [&](uint32_t i) {
@@ -790,13 +1003,13 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
                            std::string("call ") + target->name + " on null");
             return false;
         }
-        args.push_back(DexValue::Ref(receiver));
+        args[argc++] = DexValue::Ref(receiver);
         slot = 1;
     }
 
     if (shorty != nullptr) {
         for (const char* p = shorty + 1; *p != '\0' && slot < arg_count; ++p) {
-            args.push_back(frame->Get(reg_at(slot)));
+            args[argc++] = frame->Get(reg_at(slot));
             slot += (*p == 'J' || *p == 'D') ? 2 : 1;
         }
     }
@@ -809,8 +1022,11 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
         DexClass* receiver_class =
             linker_ != nullptr ? linker_->ClassOfObject(receiver) : nullptr;
         if (receiver_class != nullptr) {
-            DexMethod* resolved =
-                receiver_class->FindVirtualMethod(target->name, target->signature);
+            DexMethod* resolved = FastVirtualLookup(inst, receiver_class);
+            if (resolved == nullptr) {
+                resolved = receiver_class->FindVirtualMethod(target->name, target->signature);
+                FastVirtualStore(inst, receiver_class, resolved);
+            }
             if (resolved != nullptr) {
                 target = resolved;
             } else if (target->declaring_class != nullptr &&
@@ -849,7 +1065,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     if (target->IsNative()) {
         // Libcore natives run directly in C++, bypassing the JNI ABI.
         DexValue lib_result;
-        if (LibCoreInvoke(this, target, args.data(), args.size(), &lib_result)) {
+        if (LibCoreInvoke(this, target, args, argc, &lib_result)) {
             if (HasPendingException()) return false;
             frame->set_result(lib_result);
             return true;
@@ -859,13 +1075,13 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
                            std::string("unbound native method: ") + target->name);
             return false;
         }
-        const DexValue native_result = jni_env_->CallNative(target, args.data(), args.size());
+        const DexValue native_result = jni_env_->CallNative(target, args, argc);
         if (HasPendingException()) return false;
         frame->set_result(native_result);
         return true;
     }
 
-    const DexValue result = Execute(target, args.data(), args.size());
+    const DexValue result = Execute(target, args, argc);
     if (HasPendingException()) return false;
     frame->set_result(result);
     return true;
@@ -1003,6 +1219,15 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
             return result;
         }
         if (method->dex_file == nullptr || (method->declaring_class != nullptr && method->declaring_class->dex_file == nullptr)) {
+            if (method->signature != nullptr) {
+                const char* ret = std::strrchr(method->signature, ')');
+                if (ret != nullptr && *(ret + 1) == '[') {
+                    DexClass* arrKlass = linker_->FindClass(ret + 1);
+                    if (arrKlass != nullptr) {
+                        result.l = linker_->AllocArray(arrKlass, 0);
+                    }
+                }
+            }
             return result;
         }
         ThrowException("Ljava/lang/AbstractMethodError;",
@@ -1040,7 +1265,9 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
         }
     } stack_entry(method, &frame);
 
-    const bool trace_java = kudroid::java_call_should_trace(method->name, depth_ - 1);
+    if (method->telemetry_kind == 0)
+        method->telemetry_kind = kudroid::java_call_should_trace(method->name, 3) ? 2 : 1;
+    const bool trace_java = depth_ <= 3 || method->telemetry_kind == 2;
     if (trace_java) {
         kudroid::java_call_enter(
             method->declaring_class != nullptr ? method->declaring_class->descriptor : "?",
@@ -1084,16 +1311,37 @@ bool Interpreter::EnsureInitialized(DexClass* klass) {
     if (klass == nullptr) return false;
     if (klass->status == DexClass::Status::kInitialized) return true;
     if (klass->status == DexClass::Status::kError) return false;
-    if (linker_ != nullptr && !linker_->LinkClass(klass)) return false;
+
+    // A second <clinit> would replace static sentinels and split object identity
+    // from later field reads. The flag is per class and does not wait, so a
+    // concurrent caller never blocks while holding the bytecode lock.
+    bool expected = false;
+    if (!klass->initialization_started.compare_exchange_strong(expected, true)) return true;
+
+    if (linker_ != nullptr && !linker_->LinkClass(klass)) {
+        klass->initialization_started.store(false);
+        return false;
+    }
 
     // Set kInitialized BEFORE running <clinit>: <clinit> is often referenced
     // that class itself (sputs into its static field) and will recur infinitely.
     klass->status = DexClass::Status::kInitialized;
 
     // The parent must be initialized before the child (JVM rule).
-    if (klass->superclass != nullptr) EnsureInitialized(klass->superclass);
+    if (klass->superclass != nullptr && !EnsureInitialized(klass->superclass)) {
+        klass->status = DexClass::Status::kError;
+        return false;
+    }
 
-    DexMethod* clinit = klass->FindDirectMethod("<clinit>", "()V");
+    // Class initializers are declared by each class and are never inherited.
+    DexMethod* clinit = nullptr;
+    for (DexMethod& method : klass->direct_methods) {
+        if (method.name != nullptr && std::strcmp(method.name, "<clinit>") == 0 &&
+                method.signature != nullptr && std::strcmp(method.signature, "()V") == 0) {
+            clinit = &method;
+            break;
+        }
+    }
     if (clinit == nullptr || clinit->code_item == nullptr) return true;
 
     Execute(clinit, nullptr, 0);
@@ -1127,9 +1375,8 @@ bool Interpreter::TryJit(DexFrame* frame, DexValue* out, uint32_t* resume_pc) {
 
     if (method->jit_state == DexMethod::JitState::kNotCompiled) {
         // A profile from the previous run turns a hot method into a first-call compile.
-        // Without it, kJitThreshold calls must be interpreted before the counter trips -
-        // a cost paid again on every launch, which is precisely what an ahead-of-time
-        // cache exists to remove.
+        // Without one the threshold decides; it is zero, so a supported method is
+        // compiled the first time it runs instead of paying an interpreted warm-up.
         bool compileNow = false;
         const uint32_t checksum =
             method->dex_file != nullptr ? method->dex_file->GetLocationChecksum() : 0;
@@ -2097,6 +2344,9 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
                 uint32_t igetWidth = 4;
                 switch (inst->Opcode()) {
+                    case Instruction::IGET_OBJECT:
+                        igetWidth = sizeof(DexObject*);
+                        break;
                     case Instruction::IGET_WIDE:
                         igetWidth = 8;
                         break;
@@ -2159,6 +2409,9 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
                 uint32_t iputWidth = 4;
                 switch (inst->Opcode()) {
+                    case Instruction::IPUT_OBJECT:
+                        iputWidth = sizeof(DexObject*);
+                        break;
                     case Instruction::IPUT_WIDE:
                         iputWidth = 8;
                         break;

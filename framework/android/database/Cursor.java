@@ -39,4 +39,25 @@ public interface Cursor extends Closeable {
     boolean isClosed();
     void registerDataSetObserver(DataSetObserver observer);
     void unregisterDataSetObserver(DataSetObserver observer);
+
+    default void copyStringToBuffer(int columnIndex, CharArrayBuffer buffer) {
+        final String value = getString(columnIndex);
+        if (value == null) {
+            buffer.sizeCopied = 0;
+            return;
+        }
+        buffer.data = value.toCharArray();
+        buffer.sizeCopied = buffer.data.length;
+    }
+
+    default void deactivate() {}
+    default boolean requery() { return false; }
+    default void registerContentObserver(ContentObserver observer) {}
+    default void unregisterContentObserver(ContentObserver observer) {}
+    default void setNotificationUri(android.content.ContentResolver cr, android.net.Uri uri) {}
+    default android.net.Uri getNotificationUri() { return null; }
+    default boolean getWantsAllOnMoveCalls() { return false; }
+    default void setExtras(android.os.Bundle extras) {}
+    default android.os.Bundle getExtras() { return android.os.Bundle.EMPTY; }
+    default android.os.Bundle respond(android.os.Bundle extras) { return android.os.Bundle.EMPTY; }
 }

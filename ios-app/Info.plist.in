@@ -11,9 +11,9 @@
     <key>CFBundleDisplayName</key>
     <string>KuDroid</string>
     <key>CFBundleVersion</key>
-    <string>10</string>
+    <string>14</string>
     <key>CFBundleShortVersionString</key>
-    <string>T1.0.0</string>
+    <string>T1.4</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIcons</key>
@@ -63,6 +63,186 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleURLName</key><string>KuDroid App Launch</string>
+        <key>CFBundleURLSchemes</key><array><string>kudroid</string></array>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+    </dict></array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Android Application Package</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.android.package-archive</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>apk</string>
+			</array>
+			<key>CFBundleTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Android APK Bundle</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.kudroid.android.apkm</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>apkm</string>
+			</array>
+			<key>CFBundleTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Android Expansion Package</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.kudroid.android.xapk</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>xapk</string>
+			</array>
+			<key>CFBundleTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Android Split Package</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.kudroid.android.apks</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>apks</string>
+			</array>
+			<key>CFBundleTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.android.package-archive</string>
+			<key>UTTypeDescription</key>
+			<string>Android Application Package</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>apk</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.android.package-archive</string>
+				</array>
+			</dict>
+			<key>UTTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.kudroid.android.apkm</string>
+			<key>UTTypeDescription</key>
+			<string>Android APK Bundle</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>apkm</string>
+				</array>
+			</dict>
+			<key>UTTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.kudroid.android.xapk</string>
+			<key>UTTypeDescription</key>
+			<string>Android Expansion Package</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>xapk</string>
+				</array>
+			</dict>
+			<key>UTTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.kudroid.android.apks</string>
+			<key>UTTypeDescription</key>
+			<string>Android Split Package</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>apks</string>
+				</array>
+			</dict>
+			<key>UTTypeIconFiles</key>
+			<array>
+				<string>icon.png</string>
+			</array>
+		</dict>
+	</array>
     <key>LSApplicationQueriesSchemes</key>
     <array>
         <string>stikdebug</string>

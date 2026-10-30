@@ -193,6 +193,11 @@ public class BaseBundle {
     public boolean getBoolean(String key, boolean defaultValue) {
         Object o = mMap.get(key);
         if (o instanceof Boolean) return ((Boolean) o).booleanValue();
+        if (o instanceof String) {
+            String s = (String) o;
+            if ("true".equalsIgnoreCase(s)) return true;
+            if ("false".equalsIgnoreCase(s)) return false;
+        }
         return defaultValue;
     }
 
@@ -233,6 +238,17 @@ public class BaseBundle {
     public int getInt(String key, int defaultValue) {
         Object o = mMap.get(key);
         if (o instanceof Integer) return ((Integer) o).intValue();
+        if (o instanceof Number) return ((Number) o).intValue();
+        if (o instanceof String) {
+            try {
+                String s = (String) o;
+                if (s.startsWith("@0x") || s.startsWith("@")) {
+                    String hex = s.startsWith("@0x") ? s.substring(3) : s.substring(1);
+                    return (int) Long.parseLong(hex, s.startsWith("@0x") ? 16 : 10);
+                }
+                return Integer.parseInt(s);
+            } catch (Exception ignored) {}
+        }
         return defaultValue;
     }
 
@@ -253,6 +269,12 @@ public class BaseBundle {
     public float getFloat(String key, float defaultValue) {
         Object o = mMap.get(key);
         if (o instanceof Float) return ((Float) o).floatValue();
+        if (o instanceof Number) return ((Number) o).floatValue();
+        if (o instanceof String) {
+            try {
+                return Float.parseFloat((String) o);
+            } catch (Exception ignored) {}
+        }
         return defaultValue;
     }
 
@@ -268,7 +290,9 @@ public class BaseBundle {
 
     public String getString(String key) {
         Object o = mMap.get(key);
-        return (o instanceof String) ? (String) o : null;
+        if (o instanceof String) return (String) o;
+        if (o != null) return String.valueOf(o);
+        return null;
     }
 
     public String getString(String key, String defaultValue) {

@@ -48,6 +48,36 @@ public abstract class ByteBuffer extends Buffer implements Comparable<ByteBuffer
     public abstract byte get(int index);
     public abstract ByteBuffer put(int index, byte b);
 
+    private long readNumber(int index, int bytes) {
+        if (index < 0 || index > limit() - bytes) throw new IndexOutOfBoundsException();
+        long value = 0;
+        for (int i = 0; i < bytes; i++) {
+            int at = order == ByteOrder.BIG_ENDIAN ? index + i : index + bytes - 1 - i;
+            value = (value << 8) | (get(at) & 255L);
+        }
+        return value;
+    }
+
+    private long readNumber(int bytes) {
+        if (remaining() < bytes) throw new BufferUnderflowException();
+        long value = readNumber(position(), bytes);
+        position(position() + bytes);
+        return value;
+    }
+
+    public short getShort(int index) { return (short) readNumber(index, 2); }
+    public short getShort() { return (short) readNumber(2); }
+    public char getChar(int index) { return (char) readNumber(index, 2); }
+    public char getChar() { return (char) readNumber(2); }
+    public int getInt(int index) { return (int) readNumber(index, 4); }
+    public int getInt() { return (int) readNumber(4); }
+    public long getLong(int index) { return readNumber(index, 8); }
+    public long getLong() { return readNumber(8); }
+    public float getFloat(int index) { return Float.intBitsToFloat(getInt(index)); }
+    public float getFloat() { return Float.intBitsToFloat(getInt()); }
+    public double getDouble(int index) { return Double.longBitsToDouble(getLong(index)); }
+    public double getDouble() { return Double.longBitsToDouble(getLong()); }
+
     public ByteBuffer get(byte[] dst, int offset, int length) {
         if (offset < 0 || length < 0 || offset + length > dst.length) throw new IndexOutOfBoundsException();
         if (length > remaining()) throw new BufferUnderflowException();

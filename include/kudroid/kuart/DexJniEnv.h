@@ -42,6 +42,12 @@ void kudroid_persistent_breadcrumb(const char* line);
 // raw bits (nullptr to discard).
 uint64_t kudroid_jni_call(const void* fn, const uint64_t* gp, unsigned ngp,
                           const uint64_t* fp, unsigned nfp, uint64_t* fp_ret);
+// Same as kudroid_jni_call, but appends `nstack` 8-byte stack slots after the
+// register files. Guest .so code follows Linux AAPCS64, so every stack-passed
+// scalar owns one 8-byte slot (a 32-bit value sits in the low half).
+uint64_t kudroid_jni_call_stack(const void* fn, const uint64_t* gp, unsigned ngp,
+                                const uint64_t* fp, unsigned nfp, uint64_t* fp_ret,
+                                const uint64_t* stack, unsigned nstack);
 }
 
 namespace kudroid {

@@ -4,8 +4,11 @@
 #define KUDROID_KUART_DEXCLASSLINKER_H
 
 #include <cstddef>
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,9 +37,20 @@ public:
 
     // Find class by descriptor ("Lcom/foo/Bar;", "[I", "I"). Returns nullptr if missing.
     DexClass* FindClass(const char* descriptor);
+    // Like FindClass, but a missing boot-classpath class stays missing: no placeholder is
+    // created and nothing is logged. For reflective probes (Class.forName), where a miss
+    // is an expected answer.
+    DexClass* FindClassNoStub(const char* descriptor);
 
     // Ensure class is linked (layout and vtable resolved).
     bool LinkClass(DexClass* klass);
+
+    // Per-call-site method resolution cache. The interpreter resolves the same
+    // (dex file, method index, staticness) tuple on every execution of an invoke;
+    // without this each call rescans method tables and rebuilds the signature.
+    DexMethod* FindResolvedMethod(const art::DexFile* dex, uint32_t method_idx, bool is_static);
+    void CacheResolvedMethod(const art::DexFile* dex, uint32_t method_idx, bool is_static,
+                             DexMethod* method);
 
     // Allocate an instance of `klass`.
     DexObject* AllocObject(DexClass* klass);
@@ -46,7 +60,9 @@ public:
 
     // Create or get interned DexString object.
     DexString* InternString(const char* utf8);
+    DexString* InternString(const std::string& utf8);
     DexString* NewString(const char* utf8);
+    DexString* NewString(const std::string& utf8);
 
     // Return the java.lang.Class object representing `klass`.
     DexClassObject* GetClassObject(DexClass* klass);
@@ -74,6 +90,26 @@ public:
     // Classes are cached per interface set, matching the real Proxy.getProxyClass
     // contract that two calls with the same interfaces yield the same class.
     DexClass* GetOrCreateProxyClass(const std::vector<DexClass*>& interfaces);
+
+    struct ResolvedMethodKey {
+        const art::DexFile* dex = nullptr;
+        uint32_t method_idx = 0;
+        bool is_static = false;
+        bool operator==(const ResolvedMethodKey& other) const {
+            return dex == other.dex && method_idx == other.method_idx &&
+                   is_static == other.is_static;
+        }
+    };
+    struct ResolvedMethodKeyHash {
+        size_t operator()(const ResolvedMethodKey& key) const {
+            size_t h = std::hash<const void*>()(key.dex);
+            h ^= static_cast<size_t>(key.method_idx) * 0x9E3779B97F4A7C15ull;
+            h ^= key.is_static ? 0xC2B2AE3D27D4EB4Full : 0;
+            return h;
+        }
+    };
+    std::unordered_map<ResolvedMethodKey, DexMethod*, ResolvedMethodKeyHash> resolved_methods_;
+    std::mutex resolved_methods_mutex_;
 
     // The class of `obj`, or nullptr when `obj` is not a usable object.
     //
@@ -162,6 +198,7 @@ public:
     static void LogMissingMember(const char* kind, const std::string& detail);
 
 private:
+    DexClass* FindClassImpl(const char* descriptor, bool allow_stub);
     DexClass* LoadClassFromDexFile(const art::DexFile& dex_file,
                                   const art::dex::ClassDef& class_def,
                                   const char* descriptor);
@@ -180,9 +217,13 @@ private:
     // from native code. A set of pointers rather than a scan of classes_ because
     // GetMethodID is on the hot path of JNI-heavy startup.
     std::unordered_set<const DexClass*> live_classes_;
+    mutable std::array<std::atomic<const DexClass*>, 256> registered_class_cache_{};
     // Synthesised proxy classes, keyed by their interface set so that repeated
     // newProxyInstance calls for the same interfaces share one class.
     std::unordered_map<std::string, DexClass*> proxy_classes_;
+    // FindClassImpl mutates classes_/live_classes_/loading_; class loading is
+    // reentrant (superclass/interface), so serialize it with a recursive lock.
+    std::recursive_mutex class_load_mutex_;
     std::vector<std::string> loading_;
     std::string last_error_;
 };

@@ -1,6 +1,14 @@
 package android.database;
 
-/** Stub automatically generated for android.database.CharArrayBuffer */
-public class CharArrayBuffer {
-    public CharArrayBuffer() {}
+public final class CharArrayBuffer {
+    public char[] data;
+    public int sizeCopied;
+
+    public CharArrayBuffer(int size) {
+        data = new char[size];
+    }
+
+    public CharArrayBuffer(char[] buf) {
+        data = buf;
+    }
 }

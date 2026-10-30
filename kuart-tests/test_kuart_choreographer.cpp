@@ -7,6 +7,7 @@
 #include "kudroid/kuart/DexObject.h"
 #include "kudroid/kuart/DexString.h"
 #include "kudroid/kuart/Interpreter.h"
+#include "kudroid/kuart/LibCore.h"
 #include "kudroid/platform/FramePacer.h"
 
 #include <chrono>
@@ -802,6 +803,26 @@ void test_getsystemservice_class_returns_the_window_manager() {
     }
 }
 
+void test_stopped_scheduler_releases_java_callbacks(DexObject* callback) {
+    std::printf("[shutdown] stopped scheduler releases queued Java callback state\n");
+    DexValue instance;
+    if (!CallStatic("Landroid/view/Choreographer;", "getInstance",
+                    "()Landroid/view/Choreographer;", {}, &instance, "getInstance")) return;
+    for (int i = 0; i < 2; ++i) {
+        if (!CallVirtual(instance.l, "postFrameCallbackDelayed",
+                         "(Landroid/view/Choreographer$FrameCallback;J)V",
+                         {DexValue::Ref(callback), DexValue::Long(10000)}, nullptr,
+                         "post long-delayed frame")) return;
+    }
+    Check(g_interp->jni_env()->IsGlobalRef(callback), "queued callback is retained by a global reference");
+    kudroid::frame_pacer_reset_for_test();
+    Check(kudroid::kuart::LibCoreDiscardFrameCallbacks(g_interp) >= 2,
+          "runtime cleanup discards all queued Java frame contexts");
+    Check(!g_interp->jni_env()->IsGlobalRef(callback), "runtime cleanup releases the callback global reference");
+    Check(kudroid::kuart::LibCoreDiscardFrameCallbacks(g_interp) == 0,
+          "repeated callback cleanup has no stale contexts");
+}
+
 }  // namespace
 
 int main() {
@@ -903,6 +924,7 @@ int main() {
     test_signature_lookup_is_exact();
     test_autostubbed_overload_does_not_hijack_a_real_one(probe_bad_overload);
     test_getsystemservice_class_returns_the_window_manager();
+    test_stopped_scheduler_releases_java_callbacks(callback);
 
     kudroid::frame_pacer_reset_for_test();
 

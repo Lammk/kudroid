@@ -45,6 +45,7 @@ struct ManifestInfo {
     std::string versionName;
     std::string versionCode;
     std::string appLabel;
+    std::string appIcon;
     std::string mainActivity; // activity has intent-filter MAIN+LAUNCHER
     std::string appClass;     // android:name on <application>, if any
     std::string applicationTheme;
@@ -97,8 +98,18 @@ struct ManifestInfo {
     }
 };
 
+struct PackagePreview {
+    std::string packageName;
+    std::string label;
+    std::vector<std::uint8_t> icon;
+};
+
 class APKExtractor {
 public:
+    // Read identity and icon without installing code or expansion data.
+    static bool preview_package(const std::string& path, const std::string& workDirectory,
+                                const std::string& locale, PackagePreview* preview);
+
     // Extract a regular APK: lib/arm64-v8a/*.so, *.dex, assets/, AndroidManifest.xml
     // to targetDirectory (keep the directory tree intact).
     static bool extract_apk(const std::string& apkPath,

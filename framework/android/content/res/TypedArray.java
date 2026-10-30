@@ -6,6 +6,8 @@ public class TypedArray {
     private final Resources mResources;
     private final int[] mAttrs;
     private final TypedValue[] mValues;
+    private final int[] mIndices;
+    private final int mIndexCount;
     private final Resources.Theme mTheme;
     private final android.util.AttributeSet mXml;
 
@@ -19,6 +21,14 @@ public class TypedArray {
     TypedArray(Resources resources, int[] attrs, TypedValue[] values, Resources.Theme theme,
             android.util.AttributeSet xml) {
         mResources = resources; mAttrs = attrs; mValues = values; mTheme = theme; mXml = xml;
+        mIndices = new int[attrs == null ? 0 : attrs.length];
+        int count = 0;
+        for (int i = 0; i < mIndices.length; i++) {
+            TypedValue value = values[i];
+            if (value != null && (value.type != TypedValue.TYPE_NULL
+                    || value.data == TypedValue.DATA_NULL_EMPTY)) mIndices[count++] = i;
+        }
+        mIndexCount = count;
     }
     private TypedValue value(int index) {
         if (index < 0 || index >= length()) throw new IndexOutOfBoundsException();
@@ -26,14 +36,11 @@ public class TypedArray {
     }
     public int length() { return mAttrs == null ? 0 : mAttrs.length; }
     public int getIndexCount() {
-        int count = 0;
-        for (int i = 0; i < length(); i++) if (hasValueOrEmpty(i)) count++;
-        return count;
+        return mIndexCount;
     }
     public int getIndex(int at) {
-        if (at < 0) throw new IndexOutOfBoundsException();
-        for (int i = 0; i < length(); i++) if (hasValueOrEmpty(i) && at-- == 0) return i;
-        throw new IndexOutOfBoundsException();
+        if (at < 0 || at >= mIndexCount) throw new IndexOutOfBoundsException();
+        return mIndices[at];
     }
     public Resources getResources() { return mResources != null ? mResources : Resources.getSystem(); }
     public boolean hasValue(int index) {

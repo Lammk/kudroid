@@ -1,10 +1,14 @@
 #include "kudroid/platform/VectorRasterizer.h"
+#include "kudroid/platform/PixelColorFilter.h"
 #include <fstream>
 #include "kudroid/kuart/LibCore.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#if defined(KUDROID_HAVE_SQLITE3)
+#include <sqlite3.h>
+#endif
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -25,6 +29,9 @@
 #include <unistd.h>
 #include <vector>
 #if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
 #include <memory>
 #include <pthread.h>
 #endif
@@ -39,6 +46,7 @@
 #include "kudroid/kuart/DexString.h"
 #include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/VmLock.h"
+#include "kudroid/platform/ThermalShim.h"
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/ResourceTable.h"
@@ -223,7 +231,7 @@ private:
 // before its characters are known.
 void InitStringFrom(DexClassLinker* linker, DexObject* self, const std::string& utf8) {
     auto* str = reinterpret_cast<DexString*>(self);
-    DexString* fresh = linker->NewString(utf8.c_str());
+    DexString* fresh = linker->NewString(utf8);
     if (fresh == nullptr) return;
     str->utf8 = fresh->utf8;
     str->length = fresh->length;
@@ -587,7 +595,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             }
             desc += ";";
         }
-        DexClass* klass = interp->linker()->FindClass(desc.c_str());
+        DexClass* klass = interp->linker()->FindClassNoStub(desc.c_str());
         // A stub is a placeholder for a boot-classpath class KuDroid does not ship
         // yet; it has no methods or fields, so reporting success here would hand
         // the caller an unusable Class and surface the real problem much later as
@@ -1999,7 +2007,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
             interp->ThrowException("Ljava/lang/NullPointerException;", "char[] null");
             return true;
         }
-        if (offset < 0 || count < 0 || offset + count > chars->length) {
+        if (offset < 0 || count < 0 || offset > chars->length - count) {
             interp->ThrowException("Ljava/lang/StringIndexOutOfBoundsException;",
                                    "offset " + std::to_string(offset) + " count " +
                                        std::to_string(count));
@@ -2018,7 +2026,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
             interp->ThrowException("Ljava/lang/NullPointerException;", "byte[] null");
             return true;
         }
-        if (offset < 0 || count < 0 || offset + count > bytes->length) {
+        if (offset < 0 || count < 0 || offset > bytes->length - count) {
             interp->ThrowException("Ljava/lang/StringIndexOutOfBoundsException;",
                                    "offset " + std::to_string(offset));
             return true;
@@ -2046,7 +2054,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
     }
 
     if (std::strcmp(name, "intern") == 0) {
-        result->l = linker->InternString(self->utf8 ? self->utf8 : "");
+        result->l = linker->InternString(std::string(self->utf8 ? self->utf8 : "", self->length));
         return true;
     }
     if (std::strcmp(name, "length") == 0) {
@@ -2162,14 +2170,18 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
             return true;
         }
         result->l = linker->NewString(
-            view.SubstringUtf8(static_cast<uint32_t>(begin), static_cast<uint32_t>(end))
-                .c_str());
+            view.SubstringUtf8(static_cast<uint32_t>(begin), static_cast<uint32_t>(end)));
         return true;
     }
     if (std::strcmp(name, "concat") == 0) {
         std::string out(self->utf8 ? self->utf8 : "", self->length);
-        out += GetStringUtf8(args[1]);
-        result->l = linker->NewString(out.c_str());
+        DexString* other = AsString(args[1]);
+        if (!other) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "concat null");
+            return true;
+        }
+        out.append(other->utf8, other->length);
+        result->l = linker->NewString(out);
         return true;
     }
     if (std::strcmp(name, "replace") == 0) {
@@ -2183,14 +2195,14 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
                 const uint16_t c = view.at(i);
                 units.push_back(c == from ? to : c);
             }
-            result->l = linker->NewString(Utf16ToUtf8(units.data(), units.size()).c_str());
+            result->l = linker->NewString(Utf16ToUtf8(units.data(), units.size()));
             return true;
         }
         const std::string haystack(self->utf8 ? self->utf8 : "", self->length);
         const std::string target = GetStringUtf8(args[1]);
         const std::string replacement = GetStringUtf8(args[2]);
         if (target.empty()) {
-            result->l = linker->NewString(haystack.c_str());
+            result->l = linker->NewString(haystack);
             return true;
         }
         std::string out;
@@ -2205,25 +2217,47 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
             out += replacement;
             pos = hit + target.size();
         }
-        result->l = linker->NewString(out.c_str());
+        result->l = linker->NewString(out);
         return true;
     }
     if (std::strcmp(name, "toLowerCase") == 0 || std::strcmp(name, "toUpperCase") == 0) {
-        // ASCII-only: full Unicode case mapping needs ICU tables that KuDroid
-        // does not ship.
         const bool upper = name[2] == 'U';
+        std::string language;
+        if (std::strcmp(signature, "(Ljava/util/Locale;)Ljava/lang/String;") == 0) {
+            if (num_args < 2 || args[1].l == nullptr) {
+                interp->ThrowException("Ljava/lang/NullPointerException;", "locale == null");
+                return true;
+            }
+            auto* localeLanguage = reinterpret_cast<DexString*>(
+                GetRefField(args[1].l, "language", "Ljava/lang/String;"));
+            if (localeLanguage != nullptr && localeLanguage->utf8 != nullptr)
+                language.assign(localeLanguage->utf8, localeLanguage->length);
+        }
         std::vector<uint16_t> units;
         units.reserve(view.length());
-        for (uint32_t i = 0; i < view.length(); ++i) {
-            uint16_t c = view.at(i);
-            if (upper && c >= 'a' && c <= 'z') {
-                c = static_cast<uint16_t>(c - 32);
-            } else if (!upper && c >= 'A' && c <= 'Z') {
-                c = static_cast<uint16_t>(c + 32);
-            }
-            units.push_back(c);
+        for (uint32_t i = 0; i < view.length(); ++i) units.push_back(view.at(i));
+#if defined(__APPLE__)
+        CFMutableStringRef mapped = CFStringCreateMutable(kCFAllocatorDefault, 0);
+        CFStringAppendCharacters(mapped, units.data(), units.size());
+        CFStringRef identifier = CFStringCreateWithCString(kCFAllocatorDefault,
+            language.c_str(), kCFStringEncodingUTF8);
+        CFLocaleRef locale = CFLocaleCreate(kCFAllocatorDefault, identifier);
+        if (upper) CFStringUppercase(mapped, locale);
+        else CFStringLowercase(mapped, locale);
+        units.resize(CFStringGetLength(mapped));
+        if (!units.empty()) CFStringGetCharacters(mapped,
+            CFRangeMake(0, units.size()), units.data());
+        CFRelease(locale);
+        CFRelease(identifier);
+        CFRelease(mapped);
+#else
+        // Non-Apple hosts retain the existing ASCII mapping.
+        for (uint16_t& c : units) {
+            if (upper && c >= 'a' && c <= 'z') c -= 32;
+            else if (!upper && c >= 'A' && c <= 'Z') c += 32;
         }
-        result->l = linker->NewString(Utf16ToUtf8(units.data(), units.size()).c_str());
+#endif
+        result->l = linker->NewString(Utf16ToUtf8(units.data(), units.size()));
         return true;
     }
     if (std::strcmp(name, "trim") == 0) {
@@ -2232,7 +2266,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
         uint32_t end = view.length();
         while (begin < end && view.at(begin) <= ' ') ++begin;
         while (end > begin && view.at(end - 1) <= ' ') --end;
-        result->l = linker->NewString(view.SubstringUtf8(begin, end).c_str());
+        result->l = linker->NewString(view.SubstringUtf8(begin, end));
         return true;
     }
     if (std::strcmp(name, "equalsIgnoreCase") == 0) {
@@ -2286,7 +2320,22 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
         return true;
     }
     if (std::strcmp(name, "getBytes") == 0) {
-        result->l = NewByteArray(linker, self->utf8 ? self->utf8 : "", self->length);
+        if (self->ascii) {
+            result->l = NewByteArray(linker, self->utf8 ? self->utf8 : "", self->length);
+            return true;
+        }
+        std::string bytes;
+        for (uint32_t i = 0; i < view.length(); ++i) {
+            uint32_t cp = view.at(i);
+            if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < view.length()
+                && view.at(i + 1) >= 0xdc00 && view.at(i + 1) <= 0xdfff) {
+                cp = 0x10000 + ((cp - 0xd800) << 10) + view.at(++i) - 0xdc00;
+            } else if (cp >= 0xd800 && cp <= 0xdfff) {
+                cp = '?';
+            }
+            AppendUtf8(&bytes, cp);
+        }
+        result->l = NewByteArray(linker, bytes.data(), bytes.size());
         return true;
     }
     if (std::strcmp(name, "toCharArray") == 0) {
@@ -2901,6 +2950,224 @@ bool Invoke_java_io_RandomAccessFile(Interpreter* /*interp*/, const char* name, 
     return false;
 }
 
+#if defined(KUDROID_HAVE_SQLITE3)
+// android.database.sqlite.SQLiteNative: a thin, static binding to the host's SQLite. Handles
+// are the sqlite3 / sqlite3_stmt pointers carried as Java longs; the Java side owns their
+// lifetime. Anything that can block runs with the VM lock released.
+bool Invoke_android_database_sqlite_SQLiteNative(Interpreter* interp, const char* name,
+                                                 const DexValue* args, size_t /*num_args*/,
+                                                 DexValue* result) {
+    auto asDb = [&](size_t i) { return reinterpret_cast<sqlite3*>(static_cast<intptr_t>(args[i].j)); };
+    auto asStmt = [&](size_t i) { return reinterpret_cast<sqlite3_stmt*>(static_cast<intptr_t>(args[i].j)); };
+    auto retString = [&](const char* text) {
+        result->l = text != nullptr
+            ? reinterpret_cast<DexObject*>(interp->linker()->NewString(text)) : nullptr;
+    };
+    static std::mutex s_open_error_mtx;
+    static std::string s_open_error;
+
+    if (std::strcmp(name, "open") == 0) {
+        // ":memory:" and the empty name are SQLite's own temporary databases, not files.
+        const std::string requested = GetStringUtf8(args[0]);
+        const std::string path = (requested.empty() || requested == ":memory:")
+                                     ? requested : RemapJavaPath(requested);
+        const int flags = args[1].i;
+        sqlite3* handle = nullptr;
+        int rc;
+        {
+            VmLockRelease unlocked;
+            rc = sqlite3_open_v2(path.c_str(), &handle, flags, nullptr);
+        }
+        if (rc != SQLITE_OK) {
+            std::lock_guard<std::mutex> lock(s_open_error_mtx);
+            s_open_error = handle != nullptr ? sqlite3_errmsg(handle) : sqlite3_errstr(rc);
+            if (handle != nullptr) sqlite3_close_v2(handle);
+            handle = nullptr;
+        }
+        *result = DexValue::Long(static_cast<int64_t>(reinterpret_cast<intptr_t>(handle)));
+        return true;
+    }
+    if (std::strcmp(name, "openError") == 0) {
+        std::lock_guard<std::mutex> lock(s_open_error_mtx);
+        retString(s_open_error.c_str());
+        return true;
+    }
+    if (std::strcmp(name, "close") == 0) {
+        sqlite3* db = asDb(0);
+        if (db != nullptr) {
+            VmLockRelease unlocked;
+            sqlite3_close_v2(db);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "errorMessage") == 0) {
+        sqlite3* db = asDb(0);
+        retString(db != nullptr ? sqlite3_errmsg(db) : "no database");
+        return true;
+    }
+    if (std::strcmp(name, "errorCode") == 0) {
+        sqlite3* db = asDb(0);
+        *result = DexValue::Int(db != nullptr ? sqlite3_extended_errcode(db) : SQLITE_MISUSE);
+        return true;
+    }
+    if (std::strcmp(name, "exec") == 0) {
+        sqlite3* db = asDb(0);
+        const std::string sql = GetStringUtf8(args[1]);
+        int rc = SQLITE_MISUSE;
+        if (db != nullptr) {
+            VmLockRelease unlocked;
+            rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+        }
+        *result = DexValue::Int(rc);
+        return true;
+    }
+    if (std::strcmp(name, "changes") == 0) {
+        sqlite3* db = asDb(0);
+        *result = DexValue::Int(db != nullptr ? sqlite3_changes(db) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "lastInsertRowId") == 0) {
+        sqlite3* db = asDb(0);
+        *result = DexValue::Long(db != nullptr ? sqlite3_last_insert_rowid(db) : -1);
+        return true;
+    }
+    if (std::strcmp(name, "prepare") == 0) {
+        sqlite3* db = asDb(0);
+        const std::string sql = GetStringUtf8(args[1]);
+        sqlite3_stmt* stmt = nullptr;
+        if (db != nullptr) {
+            VmLockRelease unlocked;
+            if (sqlite3_prepare_v2(db, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr) != SQLITE_OK) {
+                stmt = nullptr;
+            }
+        }
+        *result = DexValue::Long(static_cast<int64_t>(reinterpret_cast<intptr_t>(stmt)));
+        return true;
+    }
+    if (std::strcmp(name, "finalizeStmt") == 0) {
+        if (sqlite3_stmt* stmt = asStmt(0)) sqlite3_finalize(stmt);
+        return true;
+    }
+    if (std::strcmp(name, "reset") == 0) {
+        if (sqlite3_stmt* stmt = asStmt(0)) sqlite3_reset(stmt);
+        return true;
+    }
+    if (std::strcmp(name, "clearBindings") == 0) {
+        if (sqlite3_stmt* stmt = asStmt(0)) sqlite3_clear_bindings(stmt);
+        return true;
+    }
+    if (std::strcmp(name, "bindParameterCount") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Int(stmt != nullptr ? sqlite3_bind_parameter_count(stmt) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "bindNull") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Int(stmt != nullptr ? sqlite3_bind_null(stmt, args[1].i) : SQLITE_MISUSE);
+        return true;
+    }
+    if (std::strcmp(name, "bindLong") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Int(stmt != nullptr ? sqlite3_bind_int64(stmt, args[1].i, args[2].j) : SQLITE_MISUSE);
+        return true;
+    }
+    if (std::strcmp(name, "bindDouble") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Int(stmt != nullptr ? sqlite3_bind_double(stmt, args[1].i, args[2].d) : SQLITE_MISUSE);
+        return true;
+    }
+    if (std::strcmp(name, "bindString") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        const char* text = GetStringUtf8(args[2]);
+        *result = DexValue::Int(stmt != nullptr
+            ? sqlite3_bind_text(stmt, args[1].i, text, -1, SQLITE_TRANSIENT) : SQLITE_MISUSE);
+        return true;
+    }
+    if (std::strcmp(name, "bindBlob") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        auto* arr = reinterpret_cast<DexArray*>(args[2].l);
+        int rc = SQLITE_MISUSE;
+        if (stmt != nullptr) {
+            rc = arr != nullptr
+                ? sqlite3_bind_blob(stmt, args[1].i, reinterpret_cast<const uint8_t*>(arr + 1),
+                                    arr->length, SQLITE_TRANSIENT)
+                : sqlite3_bind_null(stmt, args[1].i);
+        }
+        *result = DexValue::Int(rc);
+        return true;
+    }
+    if (std::strcmp(name, "step") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        int rc = SQLITE_MISUSE;
+        if (stmt != nullptr) {
+            VmLockRelease unlocked;
+            rc = sqlite3_step(stmt);
+        }
+        *result = DexValue::Int(rc);
+        return true;
+    }
+    if (std::strcmp(name, "columnCount") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Int(stmt != nullptr ? sqlite3_column_count(stmt) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "columnName") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        retString(stmt != nullptr ? sqlite3_column_name(stmt, args[1].i) : nullptr);
+        return true;
+    }
+    if (std::strcmp(name, "columnType") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Int(stmt != nullptr ? sqlite3_column_type(stmt, args[1].i) : SQLITE_NULL);
+        return true;
+    }
+    if (std::strcmp(name, "columnLong") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Long(stmt != nullptr ? sqlite3_column_int64(stmt, args[1].i) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "columnDouble") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        *result = DexValue::Double(stmt != nullptr ? sqlite3_column_double(stmt, args[1].i) : 0.0);
+        return true;
+    }
+    if (std::strcmp(name, "columnString") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        const unsigned char* text = stmt != nullptr ? sqlite3_column_text(stmt, args[1].i) : nullptr;
+        retString(text != nullptr ? reinterpret_cast<const char*>(text) : nullptr);
+        return true;
+    }
+    if (std::strcmp(name, "columnBlob") == 0) {
+        sqlite3_stmt* stmt = asStmt(0);
+        result->l = nullptr;
+        if (stmt != nullptr) {
+            const void* data = sqlite3_column_blob(stmt, args[1].i);
+            const int size = sqlite3_column_bytes(stmt, args[1].i);
+            if (data != nullptr || size == 0) {
+                result->l = reinterpret_cast<DexObject*>(NewByteArray(
+                    interp->linker(), static_cast<const char*>(data), static_cast<size_t>(size)));
+            }
+        }
+        return true;
+    }
+    if (std::strcmp(name, "isAvailable") == 0) {
+        *result = DexValue::Int(1);
+        return true;
+    }
+    return false;
+}
+#else
+bool Invoke_android_database_sqlite_SQLiteNative(Interpreter* /*interp*/, const char* name,
+                                                 const DexValue* /*args*/, size_t /*num_args*/,
+                                                 DexValue* result) {
+    // Built without SQLite: every call reports failure (open yields no handle).
+    if (std::strcmp(name, "isAvailable") == 0) { *result = DexValue::Int(0); return true; }
+    if (std::strcmp(name, "openError") == 0) { result->l = nullptr; return true; }
+    *result = DexValue::Long(0);
+    return true;
+}
+#endif
+
 bool Invoke_java_io_PrintStream(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                 size_t /*num_args*/, DexValue* /*result*/) {
     if (std::strcmp(name, "writeNative") == 0) {
@@ -2939,8 +3206,57 @@ bool Invoke_android_util_Log(Interpreter* /*interp*/, const char* name, const De
     return false;
 }
 
-bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, const DexValue* args,
-                                    size_t /*num_args*/, DexValue* result) {
+bool Invoke_android_graphics_Canvas(Interpreter* interp, const char* name, const DexValue* args,
+                                    size_t num_args, DexValue* result) {
+    if (std::strcmp(name, "native_filterColor") == 0) {
+        result->i = static_cast<int32_t>(FilterPixelColor(args[0].i, args[1].i, args[2].i));
+        return true;
+    }
+    if (std::strcmp(name, "native_blitBitmap") == 0) {
+        if (num_args < 21) return false;
+        auto* target = reinterpret_cast<DexArray*>(args[0].l);
+        auto* source = reinterpret_cast<DexArray*>(args[3].l);
+        const int tw = args[1].i, th = args[2].i, sw = args[4].i, sh = args[5].i;
+        const int sx = args[6].i, sy = args[7].i, width = args[8].i, height = args[9].i;
+        if (target == nullptr || source == nullptr || tw <= 0 || th <= 0 || sw <= 0 || sh <= 0
+                || static_cast<int64_t>(tw) * th > target->length || static_cast<int64_t>(sw) * sh > source->length
+                || sx < 0 || sy < 0 || width <= 0 || height <= 0
+                || static_cast<int64_t>(sx) + width > sw || static_cast<int64_t>(sy) + height > sh) {
+            interp->ThrowException("Ljava/lang/IllegalArgumentException;", "invalid bitmap region");
+            return true;
+        }
+        const float dx = args[10].f, dy = args[11].f, dw = args[12].f, dh = args[13].f;
+        if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dw) || !std::isfinite(dh)
+                || dw == 0 || dh == 0) return true;
+        const int left = static_cast<int>(std::clamp(std::ceil(std::min(dx, dx + dw)), 0.0f, static_cast<float>(tw)));
+        const int top = static_cast<int>(std::clamp(std::ceil(std::min(dy, dy + dh)), 0.0f, static_cast<float>(th)));
+        const int right = static_cast<int>(std::clamp(std::ceil(std::max(dx, dx + dw)), 0.0f, static_cast<float>(tw)));
+        const int bottom = static_cast<int>(std::clamp(std::ceil(std::max(dy, dy + dh)), 0.0f, static_cast<float>(th)));
+        const int x0 = std::max(left, args[14].i), y0 = std::max(top, args[15].i);
+        const int x1 = std::min(right, args[16].i), y1 = std::min(bottom, args[17].i);
+        if (x0 >= x1 || y0 >= y1) return true;
+        const auto* pixels = reinterpret_cast<const uint32_t*>(source->Data());
+        std::vector<uint32_t> snapshot;
+        if (source == target) { snapshot.assign(pixels, pixels + source->length); pixels = snapshot.data(); }
+        auto* output = reinterpret_cast<uint32_t*>(target->Data());
+        for (int y = y0; y < y1; ++y) {
+            const int py = sy + static_cast<int>(std::clamp((y + 0.5 - dy) / dh * height, 0.0, static_cast<double>(height - 1)));
+            for (int x = x0; x < x1; ++x) {
+                const int px = sx + static_cast<int>(std::clamp((x + 0.5 - dx) / dw * width, 0.0, static_cast<double>(width - 1)));
+                const uint32_t pixel = ModulatePixelAlpha(FilterPixelColor(pixels[py * sw + px], args[19].i, args[20].i), args[18].i);
+                const uint32_t sa = pixel >> 24;
+                if (sa == 0) continue;
+                uint32_t& dst = output[y * tw + x];
+                if (sa == 255) { dst = pixel; continue; }
+                const uint32_t da = dst >> 24, inverse = 255 - sa, denominator = sa * 255 + da * inverse;
+                auto mix = [&](int shift) {
+                    return (((pixel >> shift) & 255) * sa * 255 + ((dst >> shift) & 255) * da * inverse + denominator / 2) / denominator;
+                };
+                dst = ((denominator + 127) / 255) << 24 | mix(16) << 16 | mix(8) << 8 | mix(0);
+            }
+        }
+        return true;
+    }
     if (std::strcmp(name, "native_drawColor") == 0) {
         JavaCanvasRenderer::getInstance().drawColor(static_cast<uint32_t>(args[0].i));
         return true;
@@ -2972,11 +3288,108 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
     }
     if (std::strcmp(name, "native_drawBitmap") == 0) {
         auto* arr = reinterpret_cast<DexArray*>(args[0].l);
-        if (arr != nullptr) {
+        if (num_args >= 5 && arr != nullptr && args[1].i > 0 && args[2].i > 0
+                && static_cast<int64_t>(args[1].i) * args[2].i <= arr->length) {
             auto* pixels = reinterpret_cast<uint32_t*>(arr + 1);
             JavaCanvasRenderer::getInstance().drawBitmap(
-                pixels, args[1].i, args[2].i, args[3].f, args[4].f);
+                pixels, args[1].i, args[2].i, args[3].f, args[4].f,
+                num_args >= 8 ? args[5].i : 255, num_args >= 8 ? args[6].i : 0, num_args >= 8 ? args[7].i : -1);
         }
+        return true;
+    }
+    if (std::strcmp(name, "native_drawBitmapRegion") == 0) {
+        auto* arr = reinterpret_cast<DexArray*>(args[0].l);
+        if (num_args >= 11 && arr != nullptr && args[1].i > 0 && args[2].i > 0
+                && static_cast<int64_t>(args[1].i) * args[2].i <= arr->length
+                && args[3].i >= 0 && args[4].i >= 0 && args[5].i > 0 && args[6].i > 0
+                && static_cast<int64_t>(args[3].i) + args[5].i <= args[1].i
+                && static_cast<int64_t>(args[4].i) + args[6].i <= args[2].i) {
+            auto* pixels = reinterpret_cast<uint32_t*>(arr + 1);
+            JavaCanvasRenderer::getInstance().drawBitmapRegion(
+                pixels, args[1].i, args[2].i, args[3].i, args[4].i,
+                args[5].i, args[6].i, args[7].f, args[8].f, args[9].f, args[10].f,
+                num_args >= 14 ? args[11].i : 255, num_args >= 14 ? args[12].i : 0, num_args >= 14 ? args[13].i : -1);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "native_drawRoundRect") == 0) {
+        JavaCanvasRenderer::getInstance().drawRoundRect(
+            args[0].f, args[1].f, args[2].f, args[3].f,
+            args[4].f, args[5].f,
+            static_cast<uint32_t>(args[6].i),
+            args[7].i, args[8].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_drawCircle") == 0) {
+        JavaCanvasRenderer::getInstance().drawCircle(
+            args[0].f, args[1].f, args[2].f,
+            static_cast<uint32_t>(args[3].i),
+            args[4].i, args[5].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_drawOval") == 0) {
+        JavaCanvasRenderer::getInstance().drawOval(
+            args[0].f, args[1].f, args[2].f, args[3].f,
+            static_cast<uint32_t>(args[4].i),
+            args[5].i, args[6].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_drawLine") == 0) {
+        JavaCanvasRenderer::getInstance().drawLine(
+            args[0].f, args[1].f, args[2].f, args[3].f,
+            static_cast<uint32_t>(args[4].i), args[5].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_drawPath") == 0) {
+        auto* verbsArr = reinterpret_cast<DexArray*>(args[0].l);
+        int verbCount = args[1].i;
+        auto* coordsArr = reinterpret_cast<DexArray*>(args[2].l);
+        int coordCount = args[3].i;
+        uint32_t color = static_cast<uint32_t>(args[4].i);
+        int style = args[5].i;
+        float strokeWidth = args[6].f;
+        bool evenOdd = (args[7].i != 0);
+        if (verbsArr && coordsArr && verbCount > 0 && coordCount >= 0) {
+            const uint8_t* verbs = reinterpret_cast<const uint8_t*>(verbsArr->Data());
+            const float* coords = reinterpret_cast<const float*>(coordsArr->Data());
+            JavaCanvasRenderer::getInstance().drawPath(
+                verbs, verbCount, coords, coordCount,
+                color, style, strokeWidth, evenOdd);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "native_save") == 0) {
+        *result = DexValue::Int(JavaCanvasRenderer::getInstance().save());
+        return true;
+    }
+    if (std::strcmp(name, "native_restore") == 0) {
+        JavaCanvasRenderer::getInstance().restore();
+        return true;
+    }
+    if (std::strcmp(name, "native_restoreToCount") == 0) {
+        JavaCanvasRenderer::getInstance().restoreToCount(args[0].i);
+        return true;
+    }
+    if (std::strcmp(name, "native_translate") == 0) {
+        JavaCanvasRenderer::getInstance().translate(args[0].f, args[1].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_scale") == 0) {
+        JavaCanvasRenderer::getInstance().scale(args[0].f, args[1].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_rotate") == 0) {
+        JavaCanvasRenderer::getInstance().rotate(args[0].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_concat") == 0) {
+        JavaCanvasRenderer::getInstance().concat(
+            args[0].f, args[1].f, args[2].f, args[3].f, args[4].f, args[5].f);
+        return true;
+    }
+    if (std::strcmp(name, "native_clipRect") == 0) {
+        JavaCanvasRenderer::getInstance().clipRect(
+            args[0].f, args[1].f, args[2].f, args[3].f);
         return true;
     }
     if (std::strcmp(name, "native_flush") == 0) {
@@ -3002,9 +3415,189 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
     return false;
 }
 
+bool Invoke_android_graphics_BitmapFactory(Interpreter* interp, const char* name,
+                                           const DexValue* args, size_t num_args,
+                                           DexValue* result) {
+    if (std::strcmp(name, "nativeDecodeByteArray") == 0) {
+        if (num_args < 5) return false;
+        auto* dataArr = reinterpret_cast<DexArray*>(args[0].l);
+        int32_t offset = args[1].i;
+        int32_t length = args[2].i;
+        auto* outDimArr = reinterpret_cast<DexArray*>(args[3].l);
+        bool justBounds = (args[4].i != 0);
+
+        if (!dataArr || !outDimArr || offset < 0 || length <= 0 ||
+            offset + length > dataArr->length || outDimArr->length < 2) {
+            result->l = nullptr;
+            return true;
+        }
+
+        int32_t* outDim = reinterpret_cast<int32_t*>(outDimArr->Data());
+        outDim[0] = -1;
+        outDim[1] = -1;
+
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(dataArr->Data()) + offset;
+
+#if defined(__APPLE__)
+        CFDataRef cfData = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, bytes, length, kCFAllocatorNull);
+        if (!cfData) {
+            result->l = nullptr;
+            return true;
+        }
+        CGImageSourceRef imageSource = CGImageSourceCreateWithData(cfData, nullptr);
+        if (!imageSource) {
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        if (CGImageSourceGetCount(imageSource) == 0) {
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        int width = 0;
+        int height = 0;
+        CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nullptr);
+        if (props) {
+            CFNumberRef cfWidth = (CFNumberRef)CFDictionaryGetValue(props, kCGImagePropertyPixelWidth);
+            CFNumberRef cfHeight = (CFNumberRef)CFDictionaryGetValue(props, kCGImagePropertyPixelHeight);
+            if (cfWidth) CFNumberGetValue(cfWidth, kCFNumberIntType, &width);
+            if (cfHeight) CFNumberGetValue(cfHeight, kCFNumberIntType, &height);
+            CFRelease(props);
+        }
+
+        CGImageRef image = nullptr;
+        if (width <= 0 || height <= 0 || !justBounds) {
+            image = CGImageSourceCreateImageAtIndex(imageSource, 0, nullptr);
+            if (image) {
+                width = static_cast<int>(CGImageGetWidth(image));
+                height = static_cast<int>(CGImageGetHeight(image));
+            }
+        }
+
+        if (width <= 0 || height <= 0) {
+            if (image) CGImageRelease(image);
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        outDim[0] = width;
+        outDim[1] = height;
+
+        if (justBounds) {
+            if (image) CGImageRelease(image);
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        if (!image) {
+            image = CGImageSourceCreateImageAtIndex(imageSource, 0, nullptr);
+        }
+        if (!image) {
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        int64_t totalPixels = static_cast<int64_t>(width) * height;
+        if (totalPixels <= 0 || totalPixels > 64 * 1024 * 1024) {
+            CGImageRelease(image);
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        DexClass* intArrKlass = interp->linker()->FindClass("[I");
+        if (!intArrKlass) {
+            CGImageRelease(image);
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            result->l = nullptr;
+            return true;
+        }
+
+        DexArray* pixelsArr = interp->linker()->AllocArray(intArrKlass, static_cast<int32_t>(totalPixels));
+        if (!pixelsArr) {
+            CGImageRelease(image);
+            CFRelease(imageSource);
+            CFRelease(cfData);
+            interp->ThrowException("Ljava/lang/OutOfMemoryError;", "Failed to allocate bitmap pixels");
+            result->l = nullptr;
+            return true;
+        }
+
+        uint32_t* pixels = reinterpret_cast<uint32_t*>(pixelsArr->Data());
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(
+            pixels, width, height, 8, width * 4, colorSpace,
+            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+
+        if (ctx) {
+            CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+            CGContextDrawImage(ctx, CGRectMake(0, 0, width, height), image);
+            CGContextRelease(ctx);
+        }
+        CGColorSpaceRelease(colorSpace);
+        CGImageRelease(image);
+        CFRelease(imageSource);
+        CFRelease(cfData);
+
+        result->l = pixelsArr;
+        return true;
+#else
+        (void)interp;
+        if (length >= 24 && bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G') {
+            int width = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+            int height = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+            outDim[0] = width;
+            outDim[1] = height;
+            if (justBounds) {
+                result->l = nullptr;
+                return true;
+            }
+            int64_t totalPixels = static_cast<int64_t>(width) * height;
+            if (totalPixels > 0 && totalPixels < 64 * 1024 * 1024) {
+                DexClass* intArrKlass = interp->linker()->FindClass("[I");
+                if (intArrKlass) {
+                    DexArray* pixelsArr = interp->linker()->AllocArray(intArrKlass, static_cast<int32_t>(totalPixels));
+                    if (pixelsArr) {
+                        result->l = pixelsArr;
+                        return true;
+                    }
+                }
+            }
+        }
+        result->l = nullptr;
+        return true;
+#endif
+    }
+    return false;
+}
+
 bool Invoke_android_app_ActivityThread(Interpreter* /*interp*/, const char* name,
-                                         const DexValue* /*args*/, size_t /*num_args*/,
+                                         const DexValue* args, size_t num_args,
                                          DexValue* /*result*/) {
+    if (std::strcmp(name, "nativeReportTouchTiming") == 0) {
+        if (num_args < 3) return false;
+        const int64_t now = guest_monotonic_ns();
+        static std::atomic<int64_t> last{0};
+        int64_t previous = last.load(std::memory_order_relaxed);
+        if ((args[1].j >= 16 || args[2].j >= 16000000) && now - previous >= 1000000000ll
+                && last.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+            std::fprintf(stderr, "[KuDroidTouch] response action=%d queue=%lldms dispatch=%lldus\n",
+                         args[0].i, static_cast<long long>(args[1].j), static_cast<long long>(args[2].j / 1000));
+        }
+        return true;
+    }
     if (std::strcmp(name, "kudroid_note_java_paused") == 0) {
         kudroid_note_java_paused();
         return true;
@@ -3014,6 +3607,26 @@ bool Invoke_android_app_ActivityThread(Interpreter* /*interp*/, const char* name
 
 bool Invoke_android_app_Activity(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                  size_t num_args, DexValue* /*result*/) {
+    if (std::strcmp(name, "nativeReportFullyDrawn") == 0) {
+        if (num_args < 1) return false;
+        const std::string phase = std::string("fully-drawn ") + GetStringUtf8(args[0]);
+        kudroid_boot_mark(phase.c_str());
+        return true;
+    }
+    if (std::strcmp(name, "nativeReportFrameTimings") == 0) {
+        if (num_args < 4) return false;
+        const int64_t now = guest_monotonic_ns();
+        static std::atomic<int64_t> last{0};
+        int64_t previous = last.load(std::memory_order_relaxed);
+        if ((args[0].j >= 16000000 || args[1].j + args[2].j + args[3].j >= 16000000)
+                && now - previous >= 1000000000ll
+                && last.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+            std::fprintf(stderr, "[KuDroidFrame] queue=%lldms layout=%lldus draw=%lldus submit=%lldus\n",
+                         static_cast<long long>(args[0].j / 1000000), static_cast<long long>(args[1].j / 1000),
+                         static_cast<long long>(args[2].j / 1000), static_cast<long long>(args[3].j / 1000));
+        }
+        return true;
+    }
     if (std::strcmp(name, "setRequestedOrientation_native") == 0) {        kudroid_set_requested_orientation(args[0].i);
         return true;
     }
@@ -3213,9 +3826,28 @@ bool Invoke_android_graphics_Bitmap(Interpreter* interp, const char* name, const
             return true;
         }
         auto* data = reinterpret_cast<int32_t*>(pixels->Data());
+        const uint32_t color = static_cast<uint32_t>(args[6].i);
+        const uint32_t sa = color >> 24;
+        if (sa == 0) return true;
         for (int32_t y = top; y < bottom; ++y) {
-            std::fill(data + static_cast<int64_t>(y) * stride + left,
-                      data + static_cast<int64_t>(y) * stride + right, args[6].i);
+            int32_t* row = data + static_cast<int64_t>(y) * stride;
+            if (sa == 255) {
+                std::fill(row + left, row + right, args[6].i);
+                continue;
+            }
+            // Source-over for straight (non-premultiplied) ARGB.
+            const uint32_t inverse = 255 - sa;
+            for (int32_t x = left; x < right; ++x) {
+                const uint32_t dst = static_cast<uint32_t>(row[x]);
+                const uint32_t da = dst >> 24;
+                const uint32_t denominator = sa * 255 + da * inverse;
+                const uint32_t a = (denominator + 127) / 255;
+                auto mix = [&](int shift) {
+                    return (((color >> shift) & 255) * sa * 255 + ((dst >> shift) & 255) * da * inverse +
+                            denominator / 2) / denominator;
+                };
+                row[x] = static_cast<int32_t>(a << 24 | mix(16) << 16 | mix(8) << 8 | mix(0));
+            }
         }
         return true;
     }
@@ -3232,7 +3864,7 @@ bool Invoke_android_graphics_Bitmap(Interpreter* interp, const char* name, const
             return true;
         }
         const size_t bpp = config == 0 ? 4 : config == 1 ? 1 : 2;
-        if (config < 0 || config > 3 || offset < 0 ||
+        if (config < 0 || config > 3 || offset < 0 || offset > dst->length ||
             static_cast<size_t>(src->length) * bpp > static_cast<size_t>(dst->length - offset)) {
             interp->ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;", "bitmap copy range");
             return true;
@@ -3311,6 +3943,12 @@ bool Invoke_android_os_Vibrator(Interpreter* /*interp*/, const char* name, const
     }
     return false;}
 
+bool Invoke_android_os_PowerManager(const char* name, DexValue* result) {
+    if (std::strcmp(name, "nativeThermalStatus") != 0) return false;
+    *result = DexValue::Int(kudroid_get_thermal_status());
+    return true;
+}
+
 // Choreographer callbacks share the NDK pacer; callbacks are global refs.
 //
 //     android.view.Choreographer->getInstance()Landroid/view/Choreographer;
@@ -3359,6 +3997,7 @@ void FrameCallbackReleaseGlobalRef(Interpreter* interp, DexObject* callback) {
 void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
     auto* ctx = static_cast<JavaFrameCallback*>(data);
     if (ctx == nullptr) return;
+    VmLockGuard guard;
 
     Interpreter* interp = ctx->interp;
     DexObject* callback = ctx->callback;
@@ -3834,23 +4473,60 @@ bool Invoke_dalvik_system_BaseDexClassLoader(Interpreter* interp, const char* na
 void LibCoreSetLoadLibraryCallback(LoadLibraryCallback cb) {
     g_load_lib_cb = cb;
 }
+namespace {
+
+// Unsafe offsets are measured from the object base, while DexObject fields are
+// stored after the object header. Arrays keep their elements inline after the
+// DexArray header. Resolve both layouts so desugared JDK collections can use
+// Unsafe without silently losing writes.
+bool UnsafeAddress(DexObject* obj, uint64_t offset, size_t width, uint8_t** addr) {
+    if (obj == nullptr || obj->clazz == nullptr || addr == nullptr) return false;
+    auto* base = reinterpret_cast<uint8_t*>(obj);
+    if (obj->clazz->is_array) {
+        auto* arr = reinterpret_cast<DexArray*>(obj);
+        const uint32_t elem = DexClassLinker::ElementSize(arr->clazz->component_type);
+        if (elem == 0 || offset < sizeof(DexArray)) return false;
+        const uint64_t rel = offset - sizeof(DexArray);
+        const uint64_t total = static_cast<uint64_t>(arr->length) * elem;
+        if (rel > total || width > total - rel) return false;
+        *addr = base + offset;
+        return true;
+    }
+    if (offset < sizeof(DexObject)) return false;
+    const uint64_t end = sizeof(DexObject) + static_cast<uint64_t>(obj->clazz->object_size);
+    if (offset > end || width > end - offset) return false;
+    *addr = base + offset;
+    return true;
+}
+
+}  // namespace
+
 bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValue* args,
                             size_t num_args, DexValue* result) {
     if (std::strcmp(name, "objectFieldOffset") == 0) {
-        DexObject* field_obj = num_args > 1 ? args[1].l : nullptr;
-        if (!field_obj) {
+        DexField* field = num_args > 1 && args[1].l != nullptr ? FieldFromObject(args[1].l)
+                                                              : nullptr;
+        if (field == nullptr) {
             *result = DexValue::Long(0);
             return true;
         }
-        *result = DexValue::Long(reinterpret_cast<uintptr_t>(field_obj));
+        const uint64_t offset = field->IsStatic()
+                                    ? field->offset_or_slot
+                                    : sizeof(DexObject) + static_cast<uint64_t>(field->offset_or_slot);
+        *result = DexValue::Long(static_cast<int64_t>(offset));
         return true;
     }
     if (std::strcmp(name, "arrayBaseOffset") == 0) {
-        *result = DexValue::Int(0);
+        *result = DexValue::Int(static_cast<int32_t>(sizeof(DexArray)));
         return true;
     }
     if (std::strcmp(name, "arrayIndexScale") == 0) {
-        *result = DexValue::Int(1);
+        DexClass* klass = num_args > 1 ? ClassOf(interp, args[1].l) : nullptr;
+        uint32_t scale = 1;
+        if (klass != nullptr && klass->is_array && klass->component_type != nullptr) {
+            scale = DexClassLinker::ElementSize(klass->component_type);
+        }
+        *result = DexValue::Int(static_cast<int32_t>(scale > 0 ? scale : 1));
         return true;
     }
     if (std::strcmp(name, "compareAndSwapInt") == 0) {
@@ -3858,17 +4534,15 @@ bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValu
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
         int32_t expected = num_args > 3 ? args[3].i : 0;
         int32_t new_val = num_args > 4 ? args[4].i : 0;
-        if (obj == nullptr) {
+        uint8_t* addr = nullptr;
+        if (!UnsafeAddress(obj, offset, sizeof(int32_t), &addr)) {
             *result = DexValue::Int(0);
             return true;
         }
-        if (obj->clazz && offset < obj->clazz->object_size) {
-            auto* target = reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
-            bool success = __atomic_compare_exchange_n(target, &expected, new_val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-            *result = DexValue::Int(success ? 1 : 0);
-            return true;
-        }
-        *result = DexValue::Int(1);
+        auto* target = reinterpret_cast<int32_t*>(addr);
+        bool success = __atomic_compare_exchange_n(target, &expected, new_val, false,
+                                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        *result = DexValue::Int(success ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "compareAndSwapLong") == 0) {
@@ -3876,17 +4550,15 @@ bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValu
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
         int64_t expected = num_args > 3 ? args[3].j : 0;
         int64_t new_val = num_args > 4 ? args[4].j : 0;
-        if (obj == nullptr) {
+        uint8_t* addr = nullptr;
+        if (!UnsafeAddress(obj, offset, sizeof(int64_t), &addr)) {
             *result = DexValue::Int(0);
             return true;
         }
-        if (obj->clazz && offset < obj->clazz->object_size) {
-            auto* target = reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
-            bool success = __atomic_compare_exchange_n(target, &expected, new_val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-            *result = DexValue::Int(success ? 1 : 0);
-            return true;
-        }
-        *result = DexValue::Int(1);
+        auto* target = reinterpret_cast<int64_t*>(addr);
+        bool success = __atomic_compare_exchange_n(target, &expected, new_val, false,
+                                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        *result = DexValue::Int(success ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "compareAndSwapObject") == 0) {
@@ -3894,28 +4566,26 @@ bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValu
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
         DexObject* expected = num_args > 3 ? args[3].l : nullptr;
         DexObject* new_val = num_args > 4 ? args[4].l : nullptr;
-        if (obj == nullptr) {
+        uint8_t* addr = nullptr;
+        if (!UnsafeAddress(obj, offset, sizeof(DexObject*), &addr)) {
             *result = DexValue::Int(0);
             return true;
         }
-        if (obj->clazz && offset < obj->clazz->object_size) {
-            auto* target = reinterpret_cast<DexObject**>(reinterpret_cast<uint8_t*>(obj) + offset);
-            bool success = __atomic_compare_exchange_n(target, &expected, new_val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-            *result = DexValue::Int(success ? 1 : 0);
-            return true;
-        }
-        *result = DexValue::Int(1);
+        auto* target = reinterpret_cast<DexObject**>(addr);
+        bool success = __atomic_compare_exchange_n(target, &expected, new_val, false,
+                                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        *result = DexValue::Int(success ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "getInt") == 0 || std::strcmp(name, "getIntVolatile") == 0) {
         DexObject* obj = num_args > 1 ? args[1].l : nullptr;
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
-        if (obj && obj->clazz && offset < obj->clazz->object_size) {
-            int32_t val = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
-            *result = DexValue::Int(val);
-        } else {
-            *result = DexValue::Int(0);
+        uint8_t* addr = nullptr;
+        int32_t val = 0;
+        if (UnsafeAddress(obj, offset, sizeof(val), &addr)) {
+            std::memcpy(&val, addr, sizeof(val));
         }
+        *result = DexValue::Int(val);
         return true;
     }
     if (std::strcmp(name, "putInt") == 0 || std::strcmp(name, "putIntVolatile") == 0 ||
@@ -3923,20 +4593,21 @@ bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValu
         DexObject* obj = num_args > 1 ? args[1].l : nullptr;
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
         int32_t val = num_args > 3 ? args[3].i : 0;
-        if (obj && obj->clazz && offset < obj->clazz->object_size) {
-            *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + offset) = val;
+        uint8_t* addr = nullptr;
+        if (UnsafeAddress(obj, offset, sizeof(val), &addr)) {
+            std::memcpy(addr, &val, sizeof(val));
         }
         return true;
     }
     if (std::strcmp(name, "getLong") == 0 || std::strcmp(name, "getLongVolatile") == 0) {
         DexObject* obj = num_args > 1 ? args[1].l : nullptr;
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
-        if (obj && obj->clazz && offset < obj->clazz->object_size) {
-            int64_t val = *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
-            *result = DexValue::Long(val);
-        } else {
-            *result = DexValue::Long(0);
+        uint8_t* addr = nullptr;
+        int64_t val = 0;
+        if (UnsafeAddress(obj, offset, sizeof(val), &addr)) {
+            std::memcpy(&val, addr, sizeof(val));
         }
+        *result = DexValue::Long(val);
         return true;
     }
     if (std::strcmp(name, "putLong") == 0 || std::strcmp(name, "putLongVolatile") == 0 ||
@@ -3944,20 +4615,21 @@ bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValu
         DexObject* obj = num_args > 1 ? args[1].l : nullptr;
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
         int64_t val = num_args > 3 ? args[3].j : 0;
-        if (obj && obj->clazz && offset < obj->clazz->object_size) {
-            *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(obj) + offset) = val;
+        uint8_t* addr = nullptr;
+        if (UnsafeAddress(obj, offset, sizeof(val), &addr)) {
+            std::memcpy(addr, &val, sizeof(val));
         }
         return true;
     }
     if (std::strcmp(name, "getObject") == 0 || std::strcmp(name, "getObjectVolatile") == 0) {
         DexObject* obj = num_args > 1 ? args[1].l : nullptr;
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
-        if (obj && obj->clazz && offset < obj->clazz->object_size) {
-            DexObject* val = *reinterpret_cast<DexObject**>(reinterpret_cast<uint8_t*>(obj) + offset);
-            *result = DexValue::Ref(val);
-        } else {
-            *result = DexValue::Ref(nullptr);
+        uint8_t* addr = nullptr;
+        DexObject* val = nullptr;
+        if (UnsafeAddress(obj, offset, sizeof(DexObject*), &addr)) {
+            std::memcpy(&val, addr, sizeof(val));
         }
+        *result = DexValue::Ref(val);
         return true;
     }
     if (std::strcmp(name, "putObject") == 0 || std::strcmp(name, "putObjectVolatile") == 0 ||
@@ -3965,8 +4637,9 @@ bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValu
         DexObject* obj = num_args > 1 ? args[1].l : nullptr;
         uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
         DexObject* val = num_args > 3 ? args[3].l : nullptr;
-        if (obj && obj->clazz && offset < obj->clazz->object_size) {
-            *reinterpret_cast<DexObject**>(reinterpret_cast<uint8_t*>(obj) + offset) = val;
+        uint8_t* addr = nullptr;
+        if (UnsafeAddress(obj, offset, sizeof(val), &addr)) {
+            std::memcpy(addr, &val, sizeof(val));
         }
         return true;
     }
@@ -4179,9 +4852,28 @@ bool Invoke_VectorDrawable(Interpreter* interp, const char* name, const DexValue
     return true;
 }
 
+kudroid::ResourceStyleConfig ReadResourceConfig(const std::string& locale, DexObject* config, int sdk) {
+    kudroid::ResourceStyleConfig result;
+    result.locale = locale;
+    result.sdk = sdk;
+    result.ui_mode = GetIntField(config, "uiMode", 0);
+    result.width_dp = GetIntField(config, "screenWidthDp", 0);
+    result.height_dp = GetIntField(config, "screenHeightDp", 0);
+    result.smallest_width_dp = GetIntField(config, "smallestScreenWidthDp", 0);
+    result.orientation = GetIntField(config, "orientation", 0);
+    result.density = GetIntField(config, "densityDpi", 0);
+    result.screen_layout = GetIntField(config, "screenLayout", 0);
+    result.color_mode = GetIntField(config, "colorMode", 0);
+    return result;
+}
+
 bool Invoke_android_content_res_Resources(Interpreter* interp, const char* name,
                                           const DexValue* args, size_t num_args,
                                           DexValue* result) {
+    if (std::strcmp(name, "nativeGetDarkMode") == 0) {
+        *result = DexValue::Int(kudroid_get_dark_mode());
+        return true;
+    }
     if (std::strcmp(name, "nativeReadResource") == 0 && num_args >= 1) {
         result->l = nullptr;
         char* path = nullptr; int64_t offset = 0, length = 0;
@@ -4196,14 +4888,8 @@ bool Invoke_android_content_res_Resources(Interpreter* interp, const char* name,
         result->l = NewByteArray(interp->linker(), bytes.data(), bytes.size());
         return true;
     }
-    if (std::strcmp(name, "nativeGetStyle") == 0 && num_args >= 7) {
-        kudroid::ResourceStyleConfig config;
-        config.locale = GetStringUtf8(args[1]);
-        config.ui_mode = args[2].i;
-        config.sdk = args[3].i;
-        config.width_dp = args[4].i;
-        config.height_dp = args[5].i;
-        config.orientation = args[6].i;
+    if (std::strcmp(name, "nativeGetStyle") == 0 && num_args >= 4) {
+        const auto config = ReadResourceConfig(GetStringUtf8(args[1]), args[2].l, args[3].i);
         std::map<uint32_t, kudroid::ResourceScalar> attributes;
         if (!kudroid::resource_get_style(static_cast<uint32_t>(args[0].i), config, &attributes)) {
             result->l = nullptr;
@@ -4231,11 +4917,12 @@ bool Invoke_android_content_res_Resources(Interpreter* interp, const char* name,
                 ? interp->linker()->NewString(text.c_str()) : nullptr;
         return true;
     }
-    if (std::strcmp(name, "nativeGetValue") == 0 && num_args >= 4) {
+    if (std::strcmp(name, "nativeGetValue") == 0 && num_args >= 6) {
         kudroid::ResourceScalar value;
         DexObject* output = args[2].l;
+        const auto config = ReadResourceConfig(GetStringUtf8(args[1]), args[4].l, args[5].i);
         const bool found = output != nullptr && kudroid::resource_get_value(
-                static_cast<uint32_t>(args[0].i), GetStringUtf8(args[1]), args[3].i != 0, &value);
+                static_cast<uint32_t>(args[0].i), config, args[3].i != 0, &value);
         if (found) {
             auto set = [output](const char* field, uint32_t data) {
                 if (DexField* f = output->clazz->FindInstanceField(field, "I"))
@@ -4349,6 +5036,7 @@ bool Invoke_android_os_MessageQueue(Interpreter* /*interp*/, const char* name,
     if (std::strcmp(name, "nativeDrainInput") == 0) {
         // Only the main queue owns touch; worker loopers must not steal it.
         if (num_args >= 1 && kudroid_looper_is_main(args[0].j)) {
+            kuart_dark_mode_drain_pending();
             kuart_surface_drain_pending();
             kuart_camera_drain_pending();
             kuart_network_drain_pending();
@@ -4359,6 +5047,24 @@ bool Invoke_android_os_MessageQueue(Interpreter* /*interp*/, const char* name,
         return true;
     }
     return false;
+}
+
+size_t LibCoreDiscardFrameCallbacks(Interpreter* interp) {
+    if (interp == nullptr) return 0;
+    VmLockGuard guard;
+    std::lock_guard<std::mutex> lock(g_java_frame_mutex);
+    size_t removed = 0;
+    for (size_t i = g_java_frame_contexts.size(); i-- > 0;) {
+        JavaFrameCallback* ctx = g_java_frame_contexts[i];
+        if (ctx->interp != interp) continue;
+        g_java_frame_contexts.erase(g_java_frame_contexts.begin() + static_cast<long>(i));
+        if (interp->jni_env() != nullptr) {
+            interp->jni_env()->DeleteGlobalRef(reinterpret_cast<jobject>(ctx->callback));
+        }
+        delete ctx;
+        ++removed;
+    }
+    return removed;
 }
 
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
@@ -4422,6 +5128,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/RandomAccessFile;") == 0) return Invoke_java_io_RandomAccessFile(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/database/sqlite/SQLiteNative;") == 0) {
+        return Invoke_android_database_sqlite_SQLiteNative(interp, name, args, num_args, result);
+    }
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/util/TimeZone;") == 0) return Invoke_java_util_TimeZone(interp, name, args, num_args, result);
     // Direct buffers need a real backing store for native access.
@@ -4452,6 +5161,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0)
         return Invoke_VectorDrawable(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/graphics/BitmapFactory;") == 0) return Invoke_android_graphics_BitmapFactory(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/ActivityThread;") == 0) {
         return Invoke_android_app_ActivityThread(interp, name, args, num_args, result);
@@ -4461,6 +5171,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         return Invoke_android_view_Choreographer(interp, name, args, num_args, result);
     }
     if (std::strcmp(desc, "Landroid/os/Vibrator;") == 0) return Invoke_android_os_Vibrator(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/os/PowerManager;") == 0) return Invoke_android_os_PowerManager(name, result);
     // MessageQueue owns the native Looper wake slot; touch wakes it and the
     // Looper thread drains input itself.
     if (std::strcmp(desc, "Landroid/os/MessageQueue;") == 0) {
@@ -4538,6 +5249,12 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/view/Window;") == 0 ||
         std::strcmp(desc, "Landroid/view/View;") == 0 ||
         std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0) {
+        if (std::strcmp(desc, "Landroid/view/Window;") == 0 && std::strcmp(name, "nativeGetSafeAreaInsets") == 0) {
+            auto* edges = num_args > 0 ? reinterpret_cast<DexArray*>(args[0].l) : nullptr;
+            if (edges != nullptr && edges->length >= 4)
+                kudroid_get_safe_area_insets(reinterpret_cast<int*>(edges->Data()));
+            return true;
+        }
         return Invoke_keep_screen_on(interp, name, args, num_args, result);
     }
     if (std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0) {
@@ -4566,6 +5283,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/Debug;") == 0 ||
             std::strcmp(desc, "Landroid/os/Vibrator;") == 0 ||
+            std::strcmp(desc, "Landroid/os/PowerManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/MessageQueue;") == 0 ||
             std::strcmp(desc, "Landroid/content/res/Resources;") == 0 ||
             std::strcmp(desc, "Landroid/view/Display;") == 0 ||

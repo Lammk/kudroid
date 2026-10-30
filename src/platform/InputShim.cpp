@@ -23,7 +23,6 @@ extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
 extern "C" void bionic_ALooper_acquire(void*);
 extern "C" void bionic_ALooper_release(void*);
 extern "C" int bionic_ALooper_removeFd(void*, int);
-extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd);
 
 // The MessageQueue wake slot lives in NativeLooper.cpp (see the note there for
 // why it is not in this file). Touch injection only needs to wake the main
@@ -53,6 +52,8 @@ struct BionicInputEvent {
     int32_t pointerCount = 0;
     int32_t source = 0;
     int32_t flags = 0;
+    int32_t keyCode = 0;
+    int64_t downTime = 0;
     // One entry per finger in this event, sized by the event itself. A fixed table has
     // to clamp, and a clamped event is one whose fingers are missing from what the app
     // reads: the digitiser reports them, the event denies them.
@@ -171,26 +172,23 @@ void touch_telemetry(uint64_t inject_ns, uint64_t forward_ns) {
 struct BionicInputQueue {
     std::mutex mtx;
     std::deque<BionicInputEvent> events;
-    // getEvent hands the guest a heap copy, never interior storage: any
-    // push_back/tail-replace/pop reallocates the deque, dangling a handed-out
-    // &front() and turning every getter into a UAF (plus finishEvent's
-    // address compare then never matches, redelivering one stale event
-    // forever). Copies are matched back by sequence number; at most one is
-    // outstanding per the AInputQueue contract, and a replacement getEvent
-    // deletes an abandoned copy so leaks cannot accumulate.
-    BionicInputEvent* activeCopy = nullptr;
+    // Fetched events remain alive independently until finishEvent.
+    std::vector<BionicInputEvent*> inFlight;
     uint64_t nextSeq = 1;
-    std::atomic<int32_t> id; // looper ident; zero until a native looper attaches
+    std::atomic<bool> attached;
+    void* looper = nullptr;
     int wakePipe[2]; // pipe to wake the looper when events arrive
     bool pipeReady;
+    bool signaled = false;
 
-    BionicInputQueue() : id(0), pipeReady(false) {
+    BionicInputQueue() : attached(false), pipeReady(false) {
         wakePipe[0] = -1;
         wakePipe[1] = -1;
     }
 };
 
 static BionicInputQueue g_inputQueue;
+static int64_t g_motionDownTime = 0;
 
 // Ensure the wake pipe exists (lazily created on first use).
 // Internal locks: kudroid_inject_touch_event (Swift thread) and attachLooper
@@ -200,13 +198,29 @@ static void ensure_wake_pipe(BionicInputQueue* q) {
     std::lock_guard<std::mutex> lock(q->mtx);
     if (q->pipeReady) return;
     if (::pipe(q->wakePipe) == 0) {
-        // Set both read and write ends non-blocking.
-        int flags0 = ::fcntl(q->wakePipe[0], F_GETFL, 0);
-        ::fcntl(q->wakePipe[0], F_SETFL, flags0 | O_NONBLOCK);
-        int flags1 = ::fcntl(q->wakePipe[1], F_GETFL, 0);
-        ::fcntl(q->wakePipe[1], F_SETFL, flags1 | O_NONBLOCK);
+        for (int fd : q->wakePipe) {
+            const int flags = ::fcntl(fd, F_GETFL, 0);
+            if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0
+                    || ::fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+                ::close(q->wakePipe[0]);
+                ::close(q->wakePipe[1]);
+                q->wakePipe[0] = q->wakePipe[1] = -1;
+                return;
+            }
+        }
         q->pipeReady = true;
     }
+}
+
+// The dispatch fd stays readable until all pending events have been fetched.
+static void clearInputSignalLocked(BionicInputQueue* q) {
+    if (!q->pipeReady) return;
+    char bytes[64];
+    ssize_t result;
+    do {
+        result = ::read(q->wakePipe[0], bytes, sizeof(bytes));
+    } while (result > 0 || (result < 0 && errno == EINTR));
+    q->signaled = false;
 }
 
 // Exported for kudroid_bridge: AInputQueue pointer used to pass in
@@ -215,16 +229,37 @@ extern "C" void* kudroid_get_input_queue(void) {
     return &g_inputQueue;
 }
 
+extern "C" int kudroid_native_input_attached(void) {
+    return g_inputQueue.attached.load();
+}
+
 // Wake the looper only if a native looper is attached and polling the queue.
 static void wakeInputLooper() {
-    if (g_inputQueue.id.load() != 0) {
-        ensure_wake_pipe(&g_inputQueue);
-        if (g_inputQueue.pipeReady) {
-            uint8_t byte = 1;
-            ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
-            (void)unused;
-        }
+    std::lock_guard<std::mutex> lock(g_inputQueue.mtx);
+    if (!g_inputQueue.attached.load() || !g_inputQueue.pipeReady
+            || g_inputQueue.events.empty() || g_inputQueue.signaled) return;
+    const uint8_t byte = 1;
+    ssize_t written;
+    do {
+        written = ::write(g_inputQueue.wakePipe[1], &byte, 1);
+    } while (written < 0 && errno == EINTR);
+    g_inputQueue.signaled = written == 1 || (written < 0 && errno == EAGAIN);
+}
+
+extern "C" void kudroid_enqueue_key_event(int action, int keyCode, int64_t downTimeNanos) {
+    BionicInputEvent event;
+    event.type = 1;
+    event.action = action;
+    event.keyCode = keyCode;
+    event.source = 0x101;
+    event.eventTime = guest_monotonic_ns();
+    event.downTime = downTimeNanos;
+    {
+        std::lock_guard<std::mutex> lock(g_inputQueue.mtx);
+        event.seq = g_inputQueue.nextSeq++;
+        g_inputQueue.events.push_back(std::move(event));
     }
+    wakeInputLooper();
 }
 
 // Build one motion event from the live finger table and enqueue it. The caller holds
@@ -304,6 +339,9 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
         finalAction = (actionPointerIndex << 8) | 6;
     }
     ev.action = finalAction;
+    if (finalAction == 0 || g_motionDownTime == 0) g_motionDownTime = ev.eventTime;
+    ev.downTime = g_motionDownTime;
+    if (finalAction == 1 || finalAction == 3) g_motionDownTime = 0;
 
     // Coalesce MOVE floods in the NDK queue: replace the pending MOVE instead of
     // enqueuing another event per touch. Unity drains the queue every frame and
@@ -313,9 +351,8 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
     bool replaced = false;
     if (is_move && !g_inputQueue.events.empty()) {
         auto& tail = g_inputQueue.events.back();
-        if (tail.type == 2 && (tail.action & 0xff) == 2 &&
-            (!g_inputQueue.activeCopy || g_inputQueue.activeCopy->seq != tail.seq)) {
-            // Preserve queue identity and only replace samples not yet handed out.
+        if (tail.type == 2 && (tail.action & 0xff) == 2) {
+            // Only pending samples can be coalesced.
             const uint64_t seq = tail.seq;
             tail = ev;
             tail.seq = seq;
@@ -344,7 +381,7 @@ static uint64_t forward_touch_to_java_activity(int action, const BionicInputEven
     // event; forwarding it again would dispatch it to Java twice, and every MOVE would
     // take the VM lock against the render loop. The Java forward exists for titles that
     // never attach the native queue (the common Unity case).
-    if (g_inputQueue.id.load() != 0) return 0;
+    if (g_inputQueue.attached.load()) return 0;
     const bool is_move = (action & 0xff) == 2;  // ACTION_MOVE
     if (is_move && kudroid_touch_source_gate_allow_move() != 1) return 0;
     // Native enqueue, then wake the Looper's native wait. The UI/Looper thread
@@ -539,15 +576,17 @@ extern "C" int32_t bionic_AInputQueue_getEvent(void* queue, void** outEvent) {
     if (!queue || !outEvent) return -1;
     BionicInputQueue* q = static_cast<BionicInputQueue*>(queue);
     std::lock_guard<std::mutex> lock(q->mtx);
+    *outEvent = nullptr;
     if (q->events.empty()) {
-        *outEvent = nullptr;
-        return 0; // No event available (WOULD_BLOCK semantics)
+        clearInputSignalLocked(q);
+        return -1; // No event is available.
     }
-    // Heap copy, never &front(): see the struct comment. An abandoned previous
-    // copy is deleted here; its event stays queued until finished by seq.
-    delete q->activeCopy;
-    q->activeCopy = new (std::nothrow) BionicInputEvent(q->events.front());
-    *outEvent = q->activeCopy;
+    auto* event = new (std::nothrow) BionicInputEvent(q->events.front());
+    if (!event) return -1;
+    q->inFlight.push_back(event);
+    q->events.pop_front();
+    if (q->events.empty()) clearInputSignalLocked(q);
+    *outEvent = event;
     return 0;
 }
 
@@ -558,43 +597,61 @@ extern "C" int32_t bionic_AInputQueue_preDispatchEvent(void* queue, void* event)
 }
 
 extern "C" int32_t bionic_AInputQueue_finishEvent(void* queue, void* event, int handled) {
-    (void)handled;
     if (!queue || !event) return -1;
     BionicInputQueue* q = static_cast<BionicInputQueue*>(queue);
-    std::lock_guard<std::mutex> lock(q->mtx);
-    auto* copy = static_cast<BionicInputEvent*>(event);
-    // Pop only when the copy still names the queued front: a stale/double
-    // finish, or a finish after the queue moved on, must not pop a live event.
-    if (copy == q->activeCopy && !q->events.empty() &&
-        q->events.front().seq == copy->seq) {
-        q->events.pop_front();
+    bool unhandledKey = false;
+    BionicInputEvent key;
+    {
+        std::lock_guard<std::mutex> lock(q->mtx);
+        auto* copy = static_cast<BionicInputEvent*>(event);
+        const auto found = std::find(q->inFlight.begin(), q->inFlight.end(), copy);
+        if (found == q->inFlight.end()) return -1;
+        unhandledKey = !handled && copy->type == 1;
+        if (unhandledKey) key = *copy;
+        q->inFlight.erase(found);
+        delete copy;
     }
-    if (copy == q->activeCopy) {
-        delete q->activeCopy;
-        q->activeCopy = nullptr;
-    }
+    // Unhandled native keys retain their original action and tracking times.
+    if (unhandledKey) kuart_dispatch_key_event(key.action, key.keyCode, key.downTime, key.eventTime);
     return 0;
 }
 
 extern "C" void bionic_AInputQueue_attachLooper(void* queue, void* looper, int ident,
                                                 void* callback, void* data) {
-    if (!queue) return;
-    BionicInputQueue* q = static_cast<BionicInputQueue*>(queue);
-    q->id.store(ident);
-
-    // Register the wake pipe with the looper so poll() wakes on input.
+    if (!queue || !looper) return;
+    auto* q = static_cast<BionicInputQueue*>(queue);
     ensure_wake_pipe(q);
-    if (q->pipeReady && looper) {
-        bionic_ALooper_addFd(looper, q->wakePipe[0], ident, 0x0001 /* ALOOPER_EVENT_INPUT */,
-                             callback, data);
-        // Mark this fd as wake pipe of AInputQueue to ALooper_pollAll drain
-        // water every time it is readable — otherwise the pipe will always be ready -> busy loop.
-        bionic_ALooper_markInputPipe(looper, q->wakePipe[0]);
+    if (!q->pipeReady) return;
+    bionic_ALooper_acquire(looper);
+    void* previous = nullptr;
+    bool installed = false;
+    bool pending = false;
+    {
+        std::lock_guard<std::mutex> lock(q->mtx);
+        previous = q->looper;
+        if (previous) bionic_ALooper_removeFd(previous, q->wakePipe[0]);
+        installed = bionic_ALooper_addFd(looper, q->wakePipe[0], ident, 0x0001, callback, data) == 1;
+        q->looper = installed ? looper : nullptr;
+        q->attached.store(installed);
+        pending = !q->events.empty();
     }
+    if (previous) bionic_ALooper_release(previous);
+    if (!installed) bionic_ALooper_release(looper);
+    if (installed && pending) wakeInputLooper();
 }
 
 extern "C" void bionic_AInputQueue_detachLooper(void* queue) {
-    (void)queue;
+    if (!queue) return;
+    auto* q = static_cast<BionicInputQueue*>(queue);
+    void* previous = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(q->mtx);
+        q->attached.store(false);
+        previous = q->looper;
+        q->looper = nullptr;
+        if (previous) bionic_ALooper_removeFd(previous, q->wakePipe[0]);
+    }
+    if (previous) bionic_ALooper_release(previous);
 }
 
 extern "C" int32_t bionic_AInputQueue_hasEvents(void* queue) {
@@ -693,7 +750,7 @@ extern "C" float bionic_AMotionEvent_getRawY(const void* event, size_t pointer_i
 
 extern "C" int64_t bionic_AMotionEvent_getDownTime(const void* event) {
     if (!event) return 0;
-    return static_cast<const BionicInputEvent*>(event)->eventTime;
+    return static_cast<const BionicInputEvent*>(event)->downTime;
 }
 
 extern "C" int64_t bionic_AMotionEvent_getEventTime(const void* event) {
@@ -773,7 +830,7 @@ extern "C" int32_t bionic_AKeyEvent_getAction(const void* event) {
 }
 
 extern "C" int32_t bionic_AKeyEvent_getKeyCode(const void* event) {
-    (void)event; return 0;
+    return event != nullptr ? static_cast<const BionicInputEvent*>(event)->keyCode : 0;
 }
 
 extern "C" int32_t bionic_AKeyEvent_getScanCode(const void* event) {
@@ -790,7 +847,7 @@ extern "C" int32_t bionic_AKeyEvent_getRepeatCount(const void* event) {
 
 extern "C" int64_t bionic_AKeyEvent_getDownTime(const void* event) {
     if (!event) return 0;
-    return static_cast<const BionicInputEvent*>(event)->eventTime;
+    return static_cast<const BionicInputEvent*>(event)->downTime;
 }
 
 extern "C" int64_t bionic_AKeyEvent_getEventTime(const void* event) {

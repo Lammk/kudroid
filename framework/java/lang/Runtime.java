@@ -44,6 +44,37 @@ public class Runtime {
         System.exit(status);
     }
 
+    /**
+     * Starting a program fails the way a missing executable does: callers already handle
+     * IOException, and the host has nothing to spawn.
+     */
+    public Process exec(String command) throws java.io.IOException {
+        if (command == null) throw new NullPointerException("command == null");
+        if (command.length() == 0) throw new IllegalArgumentException("Empty command");
+        return exec(command.trim().split("\\s+"));
+    }
+
+    public Process exec(String command, String[] envp) throws java.io.IOException {
+        return exec(command);
+    }
+
+    public Process exec(String command, String[] envp, java.io.File dir) throws java.io.IOException {
+        return exec(command);
+    }
+
+    public Process exec(String[] cmdarray) throws java.io.IOException {
+        if (cmdarray == null) throw new NullPointerException("cmdarray == null");
+        return new ProcessBuilder(cmdarray).start();
+    }
+
+    public Process exec(String[] cmdarray, String[] envp) throws java.io.IOException {
+        return exec(cmdarray);
+    }
+
+    public Process exec(String[] cmdarray, String[] envp, java.io.File dir) throws java.io.IOException {
+        return exec(cmdarray);
+    }
+
     public void addShutdownHook(Thread hook) {
     }
 

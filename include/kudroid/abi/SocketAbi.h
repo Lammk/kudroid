@@ -70,8 +70,12 @@ struct GuestAddrinfo {
     struct GuestAddrinfo* ai_next;
 };
 
-// getaddrinfo hints->ai_flags: translates Linux AI_* flags to Darwin.
+// Bionic AI_* flags to Darwin or glibc; -1 for unsupported flags.
 int AddrInfoFlagsToHost(int guestFlags);
+int AddrInfoFlagsToLinux(int guestFlags);
+int NameInfoFlagsToLinux(int guestFlags);
+int AddrInfoErrorToGuest(int linuxError);
+int AddrInfoErrorToLinux(int guestError);
 
 // struct hostent, as both sides' LP64 headers lay it out.
 struct GuestHostent {

@@ -9,7 +9,28 @@ import android.content.Intent;
  * a token that grants another application permission to perform an operation. for
  * kudroid minimal framework, this is an emulation.
  */
-public final class PendingIntent {
+public final class PendingIntent implements android.os.Parcelable {
+    /** A PendingIntent is process-local here, so it cannot travel through a Parcel. */
+    public static final android.os.Parcelable.Creator<PendingIntent> CREATOR =
+            new android.os.Parcelable.Creator<PendingIntent>() {
+                @Override
+                public PendingIntent createFromParcel(android.os.Parcel in) {
+                    return null;
+                }
+
+                @Override
+                public PendingIntent[] newArray(int size) {
+                    return new PendingIntent[size];
+                }
+            };
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    @Override
+    public void writeToParcel(android.os.Parcel out, int flags) {}
     /** flag: once. */
     public static final int FLAG_ONE_SHOT = 1;
     /** flag: do not create. */

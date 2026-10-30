@@ -4,7 +4,7 @@ package java.lang;
  * Class object. KuART allocates a separate DexClassObject for each class
  * This class does not have field instances; All information is obtained through native.
  */
-public final class Class<T> {
+public final class Class<T> implements java.lang.reflect.Type, java.lang.reflect.GenericDeclaration {
 
     private Class() {
     }
@@ -358,5 +358,90 @@ public final class Class<T> {
             }
         }
         return true;
+    }
+
+    // Annotations are not retained in the loaded classes: every element reads as unannotated.
+    public <A extends java.lang.annotation.Annotation> A getAnnotation(Class<A> annotationClass) {
+        if (annotationClass == null) throw new NullPointerException();
+        return null;
+    }
+
+    public boolean isAnnotationPresent(Class<? extends java.lang.annotation.Annotation> annotationClass) {
+        return getAnnotation(annotationClass) != null;
+    }
+
+    public <A extends java.lang.annotation.Annotation> A getDeclaredAnnotation(Class<A> annotationClass) {
+        return getAnnotation(annotationClass);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <A extends java.lang.annotation.Annotation> A[] getAnnotationsByType(Class<A> annotationClass) {
+        return (A[]) java.lang.reflect.Array.newInstance(annotationClass, 0);
+    }
+
+    public java.lang.annotation.Annotation[] getAnnotations() {
+        return new java.lang.annotation.Annotation[0];
+    }
+
+    public java.lang.annotation.Annotation[] getDeclaredAnnotations() {
+        return new java.lang.annotation.Annotation[0];
+    }
+
+    public java.lang.reflect.TypeVariable<Class<T>>[] getTypeParameters() {
+        @SuppressWarnings("unchecked")
+        java.lang.reflect.TypeVariable<Class<T>>[] none = new java.lang.reflect.TypeVariable[0];
+        return none;
+    }
+
+    public java.lang.reflect.Type[] getGenericInterfaces() {
+        return getInterfaces();
+    }
+
+    public java.lang.reflect.Type getGenericSuperclass() {
+        return getSuperclass();
+    }
+
+    /** The class this one is nested in, from the "Outer$Inner" naming; null at top level. */
+    public Class<?> getEnclosingClass() {
+        final String name = getName();
+        final int dollar = name.lastIndexOf('$');
+        if (dollar <= 0 || isArray()) return null;
+        try {
+            return forName(name.substring(0, dollar));
+        } catch (ClassNotFoundException e) {
+            return null;
+        }
+    }
+
+    public Class<?> getDeclaringClass() {
+        return isAnonymousClass() ? null : getEnclosingClass();
+    }
+
+    public java.lang.reflect.Method getEnclosingMethod() { return null; }
+
+    public java.lang.reflect.Constructor<?> getEnclosingConstructor() { return null; }
+
+    public boolean isAnonymousClass() {
+        final String name = getName();
+        final int dollar = name.lastIndexOf('$');
+        if (dollar <= 0 || dollar == name.length() - 1) return false;
+        for (int i = dollar + 1; i < name.length(); i++) {
+            if (!Character.isDigit(name.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    public boolean isLocalClass() { return false; }
+
+    public boolean isMemberClass() {
+        return getEnclosingClass() != null && !isAnonymousClass();
+    }
+
+    public Class<?>[] getClasses() {
+        return new Class<?>[0];
+    }
+
+    public Class<?>[] getDeclaredClasses() {
+        return new Class<?>[0];
     }
 }

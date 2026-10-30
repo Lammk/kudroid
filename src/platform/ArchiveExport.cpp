@@ -144,6 +144,30 @@ extern "C" int kudroid_export_extract(const char* apk, const char* target, char*
         return 0;
     } catch (const std::exception& e) { return failure(error, e.what()); }
 }
+extern "C" int kudroid_preview_apk(const char* apk, const char* target, const char* locale, char** error) {
+    if (error) *error = nullptr;
+    try {
+        if (!apk || !target || !*apk || !*target) return failure(error, "Missing preview path");
+        fs::create_directories(target);
+        kudroid::PackagePreview preview;
+        if (!kudroid::APKExtractor::preview_package(apk, target, locale ? locale : "", &preview))
+            return failure(error, kudroid::APKExtractor::lastError());
+        if (preview.label.size() > 4096) return failure(error, "Application label is too long");
+        std::ofstream identity(fs::path(target) / "package.txt", std::ios::binary);
+        identity << preview.packageName;
+        if (!identity) return failure(error, "Could not save package identity");
+        std::ofstream label(fs::path(target) / "label.txt", std::ios::binary);
+        label << preview.label;
+        if (!label) return failure(error, "Could not save application label");
+        if (!preview.icon.empty()) {
+            std::ofstream icon(fs::path(target) / "app_icon.png", std::ios::binary);
+            icon.write(reinterpret_cast<const char*>(preview.icon.data()), preview.icon.size());
+            if (!icon) return failure(error, "Could not save application icon");
+        }
+        return 0;
+    } catch (const std::exception& e) { return failure(error, e.what()); }
+}
+
 extern "C" int kudroid_export_archive(const char* directory, const char* output, char** error) {
     if (error) *error = nullptr;
     if (!directory || !output || !*directory || !*output) return failure(error, "Missing archive path");

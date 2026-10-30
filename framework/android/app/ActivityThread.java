@@ -23,8 +23,13 @@ public final class ActivityThread {
     private static final int PERMISSION_RESULT = 108;
     private static final int CAMERA_EVENTS = 109;
     private static final int NETWORK_CHANGED = 110;
+    public static final int DARK_MODE_CHANGED = 111;
+    private static final int BACK = 112;
+    private static final int KEY_EVENT = 113;
     private static boolean sNetworkChangeQueued;
     private static boolean sCameraEventsQueued;
+    private static int sPendingDarkMode = -1;
+    private static boolean sDarkModeQueued;
 
     private static ActivityThread sCurrentActivityThread;
     private Activity mInitialActivity;
@@ -32,6 +37,7 @@ public final class ActivityThread {
     /** Framework classes the launch attempt found missing; shown in the fallback UI. */
     private java.util.ArrayList<String> mFrameworkGaps = new java.util.ArrayList<String>();
     private H mH;
+    private final java.util.ArrayList<Activity> mBackStack = new java.util.ArrayList<Activity>();
 
     private static native void kudroid_note_java_paused();
 
@@ -105,8 +111,23 @@ public final class ActivityThread {
                 case TOUCH_EVENT:
                     if (mInitialActivity != null && msg.obj instanceof MotionEvent) {
                         onTouchEventDispatched(msg);
+                        long start = System.nanoTime();
+                        long queued = Math.max(0, android.os.SystemClock.uptimeMillis()
+                                - ((MotionEvent) msg.obj).getEventTime());
                         mInitialActivity.dispatchTouchEvent((MotionEvent) msg.obj);
+                        nativeReportTouchTiming(((MotionEvent) msg.obj).getActionMasked(),
+                                queued, System.nanoTime() - start);
+                        mInitialActivity.requestRender();
                     }
+                    break;
+                case KEY_EVENT:
+                    if (mInitialActivity != null && msg.obj instanceof android.view.KeyEvent) {
+                        mInitialActivity.dispatchKeyEvent((android.view.KeyEvent) msg.obj);
+                        mInitialActivity.requestRender();
+                    }
+                    break;
+                case BACK:
+                    dispatchBack();
                     break;
                 case TEXT_INPUT:
                     if (msg.obj instanceof String) {
@@ -129,6 +150,12 @@ public final class ActivityThread {
                     break;
                 case PERMISSION_RESULT:
                     if (msg.obj instanceof String[]) deliverPermissionResult(msg.arg1, (String[]) msg.obj);
+                    break;
+                case DARK_MODE_CHANGED:
+                    sDarkModeQueued = false;
+                    int mode = sPendingDarkMode;
+                    sPendingDarkMode = -1;
+                    if (mode >= 0) applyDarkMode(mode != 0);
                     break;
             }
         }
@@ -257,6 +284,51 @@ public final class ActivityThread {
         }
     }
 
+    /** Forward host dark mode state to the active application and resources. */
+    public static void postDarkModeChanged(boolean isDark) {
+        sPendingDarkMode = isDark ? 1 : 0;
+        if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
+        if (sDarkModeQueued) return;
+        sDarkModeQueued = true;
+        Message msg = Message.obtain();
+        msg.what = DARK_MODE_CHANGED;
+        sCurrentActivityThread.mH.sendMessage(msg);
+    }
+
+    private static boolean updateNightMode(android.content.res.Resources resources, int nightMode) {
+        if (resources == null) return false;
+        android.content.res.Configuration config = resources.getConfiguration();
+        if ((config.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK) == nightMode) return false;
+        android.content.res.Configuration updated = new android.content.res.Configuration(config);
+        updated.uiMode = (updated.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | nightMode;
+        resources.updateConfiguration(updated, null);
+        return true;
+    }
+
+    public static void applyDarkMode(boolean isDark) {
+        int nightMode = isDark ? android.content.res.Configuration.UI_MODE_NIGHT_YES
+                               : android.content.res.Configuration.UI_MODE_NIGHT_NO;
+        updateNightMode(android.content.res.Resources.getSystem(), nightMode);
+        ActivityThread at = sCurrentActivityThread;
+        if (at == null) return;
+        android.content.res.Resources appResources = at.mApplication != null ? at.mApplication.getResources() : null;
+        boolean applicationChanged = updateNightMode(appResources, nightMode);
+        boolean activityChanged = false;
+        android.content.res.Resources actRes = null;
+        if (at != null && at.mInitialActivity != null) {
+            actRes = at.mInitialActivity.getResources();
+            activityChanged = updateNightMode(actRes, nightMode)
+                    || (applicationChanged && actRes == appResources);
+        }
+        if (applicationChanged) {
+            at.mApplication.onConfigurationChanged(new android.content.res.Configuration(appResources.getConfiguration()));
+        }
+        if (activityChanged) {
+            at.mInitialActivity.onConfigurationChanged(new android.content.res.Configuration(actRes.getConfiguration()));
+            at.mInitialActivity.requestRender();
+        }
+    }
+
     /**
      * Coalesce touch floods: a drag produces 60-120 MOVE events/s, and each
      * one as its own Looper message starves everything else on the main thread
@@ -274,6 +346,75 @@ public final class ActivityThread {
         postTouchEvent(action, pointerCount, null, null, null, x, y);
     }
 
+    public static void postKeyEvent(int action, int keyCode, long downTime, long eventTime) {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null) return;
+        thread.mH.obtainMessage(KEY_EVENT,
+                new android.view.KeyEvent(downTime, eventTime, action, keyCode, 0)).sendToTarget();
+    }
+
+    public static void postBack() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread != null && thread.mH != null) thread.mH.sendEmptyMessage(BACK);
+    }
+
+    private void dispatchBack() {
+        Activity activity = mInitialActivity;
+        if (activity == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        android.view.KeyEvent down = new android.view.KeyEvent(now, now, 0, 4, 0);
+        android.view.KeyEvent up = new android.view.KeyEvent(now, now, 1, 4, 0);
+        ViewBackDispatch.dispatch(activity, down, up);
+        activity.requestRender();
+    }
+
+    private static final class ViewBackDispatch {
+        static void dispatch(Activity activity, android.view.KeyEvent down, android.view.KeyEvent up) {
+            android.view.View focus = activity.getCurrentFocus();
+            boolean preIme = focus != null && focus.dispatchKeyEventPreIme(down);
+            if (focus != null) preIme |= focus.dispatchKeyEventPreIme(up);
+            if (preIme) return;
+            android.view.inputmethod.InputMethodManager ime =
+                    android.view.inputmethod.InputMethodManager.getInstance();
+            if (ime.isSoftInputVisible() && ime.hideSoftInputFromWindow(null, 0)) return;
+            activity.dispatchKeyEvent(down);
+            activity.dispatchKeyEvent(up);
+        }
+    }
+
+    static void finishActivity(final Activity activity) {
+        final ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null) return;
+        thread.mH.post(new Runnable() {
+            public void run() { thread.handleFinishActivity(activity); }
+        });
+    }
+
+    private void handleFinishActivity(Activity activity) {
+        if (activity == null || activity.isDestroyed()) return;
+        if (activity != mInitialActivity) {
+            if (mBackStack.remove(activity)) activity.performDestroy();
+            return;
+        }
+        if (mBackStack.isEmpty()) { handleDestroyActivity(); return; }
+        if (activity.hasWindowFocus()) activity.performWindowFocusChanged(false);
+        if (activity.isResumed()) activity.performPause();
+        if (activity.isStarted()) activity.performStop();
+        activity.getWindow().dispatchSurfaceDestroyed();
+        activity.performDestroy();
+        Activity previous = mBackStack.remove(mBackStack.size() - 1);
+        mInitialActivity = previous;
+        mInitialActivityName = previous.getClass().getName();
+        previous.performRestart();
+        handleResumeActivity();
+    }
+
+    public static void postTouchEvent(int action, int pointerCount, float x, float y, long eventTime) {
+        postTouchEvent(action, pointerCount, null, null, null, x, y, eventTime);
+    }
+
+    private static native void nativeReportTouchTiming(int action, long ageMillis, long dispatchNanos);
+
     /**
      * Touch event carrying every live finger.
      *
@@ -284,8 +425,13 @@ public final class ActivityThread {
      */
     public static void postTouchEvent(int action, int pointerCount, int[] ids, float[] xs,
             float[] ys, float x, float y) {
+        postTouchEvent(action, pointerCount, ids, xs, ys, x, y, android.os.SystemClock.uptimeMillis());
+    }
+
+    public static void postTouchEvent(int action, int pointerCount, int[] ids, float[] xs,
+            float[] ys, float x, float y, long eventTime) {
         if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
-        final long now = android.os.SystemClock.uptimeMillis();
+        final long now = eventTime;
         final int maskedAction = action & MotionEvent.ACTION_MASK;
         if (pointerCount < 1) pointerCount = 1;
         final boolean havePointers = ids != null && xs != null && ys != null
@@ -370,8 +516,10 @@ public final class ActivityThread {
     public static void main(String[] args) {
         // KuART keeps its Java heap and static fields between shell sessions.
         // Clear only state owned by this guest UI thread before preparing a new run.
-        Looper.resetMainLooperForRelaunch();
-        android.view.Choreographer.resetForRelaunch();
+        if (Looper.getMainLooper() == null || Looper.getMainLooper().isQuitting()) {
+            Looper.resetMainLooperForRelaunch();
+            android.view.Choreographer.resetForRelaunch();
+        }
         sPendingMoveMsg = null;
         sLastDownTime = 0;
         sCurrentActivityThread = null;
@@ -507,6 +655,7 @@ public final class ActivityThread {
     private void attach() {
         sCurrentActivityThread = this;
         mH = new H();
+        if (sPendingDarkMode >= 0) postDarkModeChanged(sPendingDarkMode != 0);
     }
 
     /**
@@ -905,6 +1054,7 @@ public final class ActivityThread {
         root.addView(tail);
 
         host.setContentView(root);
+        host.renderViewHierarchy();
     }
 
     private void handlePauseActivity() {
@@ -1005,26 +1155,28 @@ public final class ActivityThread {
         Runnable r = new Runnable() {
             @Override
             public void run() {
+                Activity previous = mInitialActivity;
+                Activity next = null;
+                boolean previousStopped = false;
                 try {
                     Class<?> nextClass = Class.forName(resolvedTarget);
                     if (!Activity.class.isAssignableFrom(nextClass)) {
                         android.util.Log.e("ActivityThread", "Target class is not an Activity: " + resolvedTarget);
                         return;
                     }
-                    if (from != null) {
-                        if (from.hasWindowFocus()) from.performWindowFocusChanged(false);
-                        if (from.isResumed()) from.performPause();
-                        if (from.isStarted()) from.performStop();
-                        if (from.isFinishing()) from.performDestroy();
-                    }
-                    Activity next;
-                    if (mComponentFactory != null) {
-                        next = mComponentFactory.instantiateActivity(
-                                ClassLoader.getSystemClassLoader(), nextClass.getName(), intent);
-                    } else {
-                        next = (Activity) nextClass.newInstance();
-                    }
+                    next = mComponentFactory != null
+                            ? mComponentFactory.instantiateActivity(
+                                    ClassLoader.getSystemClassLoader(), nextClass.getName(), intent)
+                            : (Activity) nextClass.newInstance();
                     attachActivity(next, resolvedTarget);
+                    next.setIntent(intent);
+                    if (previous != null) {
+                        previousStopped = true;
+                        if (previous.hasWindowFocus()) previous.performWindowFocusChanged(false);
+                        if (previous.isResumed()) previous.performPause();
+                        if (previous.isStarted()) previous.performStop();
+                        previous.getWindow().dispatchSurfaceDestroyed();
+                    }
                     mInitialActivity = next;
                     mInitialActivityName = resolvedTarget;
                     next.performCreate(null);
@@ -1033,14 +1185,34 @@ public final class ActivityThread {
                     next.renderViewHierarchy();
                     dispatchSurfaceCallbacks(next);
                     next.performWindowFocusChanged(true);
+                    if (previous != null) {
+                        if (previous.isFinishing()
+                                || (previous.getIntent().getFlags() & Intent.FLAG_ACTIVITY_NO_HISTORY) != 0) {
+                            previous.performDestroy();
+                        } else {
+                            mBackStack.add(previous);
+                        }
+                    }
                     android.util.Log.i("ActivityThread", "Target Activity transitioned successfully: " + resolvedTarget);
                 } catch (Throwable t) {
                     android.util.Log.e("ActivityThread", "Failed to start activity " + resolvedTarget, t);
                     final String gap = frameworkGapOf(t);
                     if (gap != null && !mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
-                    // The previous activity is already stopped, so without a view of its
-                    // own the screen would stay blank; say what stopped it instead.
-                    if (mInitialActivity == null || mInitialActivity.getContentView() == null) {
+                    if (next != null) {
+                        try {
+                            if (next.hasWindowFocus()) next.performWindowFocusChanged(false);
+                            if (next.isResumed()) next.performPause();
+                            if (next.isStarted()) next.performStop();
+                            next.getWindow().dispatchSurfaceDestroyed();
+                            next.performDestroy();
+                        } catch (Throwable cleanup) { cleanup.printStackTrace(); }
+                    }
+                    mInitialActivity = previous;
+                    mInitialActivityName = previous != null ? previous.getClass().getName() : resolvedTarget;
+                    if (previousStopped && previous != null && !previous.isDestroyed()) {
+                        previous.performRestart();
+                        handleResumeActivity();
+                    } else if (previous == null) {
                         mInitialActivity = new Activity();
                         showDiagnosticScreen(mInitialActivity, resolvedTarget, t);
                     }
@@ -1080,6 +1252,12 @@ public final class ActivityThread {
                 mInitialActivity.performDestroy();
                 mInitialActivity = null;
             }
+            for (int i = mBackStack.size() - 1; i >= 0; i--) {
+                Activity previous = mBackStack.get(i);
+                previous.getWindow().dispatchSurfaceDestroyed();
+                previous.performDestroy();
+            }
+            mBackStack.clear();
         } catch (Throwable t) {
             t.printStackTrace();
         }

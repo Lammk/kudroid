@@ -24,7 +24,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
-          sudo apt-get install -y --no-install-recommends cmake g++ ccache zlib1g-dev \
+          sudo apt-get install -y --no-install-recommends cmake g++ ccache zlib1g-dev libsqlite3-dev \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user-static
 
       - name: Setup ccache
@@ -106,7 +106,7 @@ jobs:
           node-version: '24'
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ ccache zip
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ccache zip libsqlite3-dev
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2

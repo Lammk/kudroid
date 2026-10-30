@@ -214,15 +214,68 @@ static_assert(offsetof(GuestAddrinfo, ai_next) == 40, "GuestAddrinfo ai_next off
 static_assert(sizeof(GuestAddrinfo) == 48, "GuestAddrinfo size");
 
 int AddrInfoFlagsToHost(int f) {
-    int host = 0;
-    if (f & 0x1) host |= 0x0001;    // AI_PASSIVE
-    if (f & 0x2) host |= 0x0002;    // AI_CANONNAME
-    if (f & 0x4) host |= 0x0004;    // AI_NUMERICHOST
-    if (f & 0x8) host |= 0x0800;    // Linux AI_V4MAPPED (0x8) -> Darwin AI_V4MAPPED (0x800)
-    if (f & 0x10) host |= 0x0100;   // Linux AI_ALL (0x10) -> Darwin AI_ALL (0x100)
-    if (f & 0x20) host |= 0x0400;   // Linux AI_ADDRCONFIG (0x20) -> Darwin AI_ADDRCONFIG (0x400)
-    if (f & 0x400) host |= 0x1000;  // Linux AI_NUMERICSERV (0x400) -> Darwin AI_NUMERICSERV (0x1000)
+    if (f & ~0xf0f) return -1;
+    int host = f & ~0x8;
+    if (f & 0x8) host |= 0x1000;  // AI_NUMERICSERV
     return host;
+}
+
+int AddrInfoFlagsToLinux(int f) {
+    if (f & ~0xd0f) return -1;
+    int host = f & 0x7;
+    if (f & 0x8) host |= 0x400;  // AI_NUMERICSERV
+    if (f & 0x100) host |= 0x10; // AI_ALL
+    if (f & 0x400) host |= 0x20; // AI_ADDRCONFIG
+    if (f & 0x800) host |= 0x8;  // AI_V4MAPPED
+    return host;
+}
+
+int NameInfoFlagsToLinux(int f) {
+    if (f & ~0x1f) return -1;
+    int host = f & 0x10;       // NI_DGRAM
+    if (f & 0x1) host |= 0x4;  // NI_NOFQDN
+    if (f & 0x2) host |= 0x1;  // NI_NUMERICHOST
+    if (f & 0x4) host |= 0x8;  // NI_NAMEREQD
+    if (f & 0x8) host |= 0x2;  // NI_NUMERICSERV
+    return host;
+}
+
+int AddrInfoErrorToGuest(int e) {
+    switch (e) {
+        case 0: return 0;
+        case -1: return 3;
+        case -2: return 8;
+        case -3: return 2;
+        case -4: return 4;
+        case -5: return 7;
+        case -6: return 5;
+        case -7: return 10;
+        case -8: return 9;
+        case -9: return 1;
+        case -10: return 6;
+        case -11: return 11;
+        case -12: return 14;
+        default: return 4;
+    }
+}
+
+int AddrInfoErrorToLinux(int e) {
+    switch (e) {
+        case 0: return 0;
+        case 1: return -9;
+        case 2: return -3;
+        case 3: return -1;
+        case 4: return -4;
+        case 5: return -6;
+        case 6: return -10;
+        case 7: return -5;
+        case 8: return -2;
+        case 9: return -8;
+        case 10: return -7;
+        case 11: return -11;
+        case 14: return -12;
+        default: return e;
+    }
 }
 
 int HostentCopy(const GuestHostent& src, int guestAddrType, GuestHostent* dst, char* buf,

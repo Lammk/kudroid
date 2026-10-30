@@ -28,6 +28,7 @@ class RemoteDebugClient: NSObject {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
         set { stateLock.lock(); defer { stateLock.unlock() }; _isConnected = newValue }
     }
+    var connectionIsActive: Bool { isConnected }
     private var serverURL: URL?
     // Main thread only: Timer must be invalidated on the thread that scheduled it.
     private var pingTimer: Timer?

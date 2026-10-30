@@ -3,6 +3,7 @@
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/GuestClock.h"
+#include "kudroid/platform/ThermalShim.h"
 #include "kudroid/platform/SurfaceTextureHost.h"
 #include "kudroid/Log.h"
 #include <jni.h>
@@ -698,9 +699,11 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
             return;
         }
     }
-    gpuLog("blit layer=%p %dx%d", layer, width, height);
+    static std::atomic<uint64_t> s_blitGeneration{0};
+    uint64_t gen = ++s_blitGeneration;
+    gpuLog("blit layer=%p %dx%d gen=%llu", layer, width, height, (unsigned long long)gen);
 
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    static CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     if (!colorSpace) return;
 
     // Snapshot: the provider does not copy, and the async setContents below
@@ -710,19 +713,13 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     const size_t rowBytes = static_cast<size_t>(width) * 4;
     const size_t byteCount = rowBytes * static_cast<size_t>(height);
     void* snapshot = malloc(byteCount);
-    if (!snapshot) {
-        CGColorSpaceRelease(colorSpace);
-        return;
-    }
+    if (!snapshot) return;
     std::memcpy(snapshot, bits, byteCount);
     CGDataProviderRef provider = CGDataProviderCreateWithData(
         snapshot, snapshot, byteCount, [](void* info, const void*, size_t) {
             std::free(info);
         });
-    if (!provider) {
-        CGColorSpaceRelease(colorSpace);
-        return;
-    }
+    if (!provider) return;
 
     CGImageRef image = CGImageCreate(
         width, height, 8, 32, width * 4,
@@ -732,12 +729,15 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     );
 
     CGDataProviderRelease(provider);
-    CGColorSpaceRelease(colorSpace);
 
     if (!image) return;
 
     // Assign CGImage directly to CALayer/CAMetalLayer on Main Thread
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (gen < s_blitGeneration.load(std::memory_order_relaxed)) {
+            CGImageRelease(image);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
         if (hardware_owns_layer(layer)) {
             CGImageRelease(image);
@@ -761,6 +761,8 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
             setContents(reinterpret_cast<id>(layer), sel_registerName("setContents:"), reinterpret_cast<id>(const_cast<CGImageRef>(image)));
 
             commitFn(reinterpret_cast<id>(clsCATransaction), sel_registerName("commit"));
+            kudroid_note_frame_presented();
+            gpuLog("canvas submitted layer=%p gen=%llu", layer, (unsigned long long)gen);
         }
         CGImageRelease(image);
     });
@@ -4008,6 +4010,12 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"AChoreographer_unregisterRefreshRateCallback", reinterpret_cast<void*>(&bionic_AChoreographer_unregisterRefreshRateCallback)},
     {"ANativeWindow_setFrameRate", reinterpret_cast<void*>(&bionic_ANativeWindow_setFrameRate)},
     {"ANativeWindow_setFrameRateWithChangeStrategy", reinterpret_cast<void*>(&bionic_ANativeWindow_setFrameRateWithChangeStrategy)},
+    {"AThermal_acquireManager", reinterpret_cast<void*>(&bionic_AThermal_acquireManager)},
+    {"AThermal_releaseManager", reinterpret_cast<void*>(&bionic_AThermal_releaseManager)},
+    {"AThermal_getCurrentThermalStatus", reinterpret_cast<void*>(&bionic_AThermal_getCurrentThermalStatus)},
+    {"AThermal_getThermalHeadroom", reinterpret_cast<void*>(&bionic_AThermal_getThermalHeadroom)},
+    {"AThermal_registerThermalStatusListener", reinterpret_cast<void*>(&bionic_AThermal_registerThermalStatusListener)},
+    {"AThermal_unregisterThermalStatusListener", reinterpret_cast<void*>(&bionic_AThermal_unregisterThermalStatusListener)},
 };
 
 } // namespace

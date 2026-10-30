@@ -72,6 +72,9 @@ public:
     // One-line environment summary for logs: "ios=<ver> machine=<id> txm~=<0|1>".
     static const char* RuntimeSummary();
 
+    // Replay cached capabilities after a run resets its log files.
+    static void LogState();
+
     // True when the TXM regime is present AND a debugger is attached — the only
     // state in which the prepare handshake can be attempted. Attempting a
     // protocol brk without an attached script raises a real SIGTRAP.
@@ -123,6 +126,12 @@ public:
     // writeView == execView otherwise. Returns {} when allocation fails.
     // `exec` requests an executable region (false = plain RW scratch).
     static Region Allocate(size_t size, bool exec);
+
+    // Prepared pages that support protection changes at one guest address.
+    static bool GuestReservationsAvailable();
+    static void* AllocateGuest(size_t size, int prot);
+    static void* GuestWritePointer(void* addr, size_t size);
+    static bool GuestMemoryOverlaps(const void* addr, size_t size);
 
     // Release a region returned by Allocate().
     static void Free(const Region& region);

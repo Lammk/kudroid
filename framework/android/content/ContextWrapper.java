@@ -89,4 +89,10 @@ public class ContextWrapper extends Context {
         return mBase != null ? mBase.getClassLoader() : super.getClassLoader();
     }
     public boolean isRestricted() { return mBase != null ? mBase.isRestricted() : false; }
+    @Override
+    public Context createPackageContext(String packageName, int flags)
+            throws PackageManager.NameNotFoundException {
+        return mBase != null ? mBase.createPackageContext(packageName, flags)
+                             : super.createPackageContext(packageName, flags);
+    }
 }

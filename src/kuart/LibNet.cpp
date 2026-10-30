@@ -45,9 +45,9 @@ ssize_t bionic_sendto(int fd, const void* buf, size_t len, int flags, const stru
 ssize_t bionic_recvfrom(int fd, void* buf, size_t len, int flags, struct sockaddr* addr,
                         socklen_t* addrlen);
 int bionic_ioctl(int fd, unsigned long request, void* arg);
-int bionic_getaddrinfo(const char* node, const char* service, const struct addrinfo* hints,
-                       struct addrinfo** res);
-void bionic_freeaddrinfo(struct addrinfo* res);
+int bionic_getaddrinfo(const char* node, const char* service, const kudroid::GuestAddrinfo* hints,
+                       kudroid::GuestAddrinfo** res);
+void bionic_freeaddrinfo(kudroid::GuestAddrinfo* res);
 int bionic_getnameinfo(const struct sockaddr* sa, socklen_t salen, char* host, socklen_t hostlen,
                        char* serv, socklen_t servlen, int flags);
 }
@@ -240,11 +240,11 @@ int DoSockName(int fd, DexArray* out, bool peer) {
 
 // Resolves to up to out->length / 17 entries of {length, 16 address bytes}.
 int DoResolve(const std::string& host, DexArray* out) {
-    struct addrinfo hints;
+    kudroid::GuestAddrinfo hints;
     std::memset(&hints, 0, sizeof(hints));
     hints.ai_family = 0;  // AF_UNSPEC
     hints.ai_socktype = 1;  // SOCK_STREAM: one entry per address
-    struct addrinfo* res = nullptr;
+    kudroid::GuestAddrinfo* res = nullptr;
     const int rc = bionic_getaddrinfo(host.c_str(), nullptr, &hints, &res);
     if (rc != 0 || res == nullptr) {
         if (res != nullptr) bionic_freeaddrinfo(res);
@@ -253,11 +253,7 @@ int DoResolve(const std::string& host, DexArray* out) {
     const int capacity = out->length / 17;
     int count = 0;
     std::vector<std::vector<uint8_t>> seen;
-#if defined(__APPLE__)
-    for (auto* ai = reinterpret_cast<kudroid::GuestAddrinfo*>(res); ai != nullptr && count < capacity; ai = ai->ai_next) {
-#else
-    for (struct addrinfo* ai = res; ai != nullptr && count < capacity; ai = ai->ai_next) {
-#endif
+    for (auto* ai = res; ai != nullptr && count < capacity; ai = ai->ai_next) {
         if (ai->ai_addr == nullptr) continue;
         const uint8_t* sa = reinterpret_cast<const uint8_t*>(ai->ai_addr);
         std::vector<uint8_t> entry(17, 0);

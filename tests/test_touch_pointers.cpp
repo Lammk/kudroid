@@ -12,14 +12,31 @@
 //   4. A MOVE batch moves every finger, not only the one the callback named.
 //   5. Consecutive MOVEs coalesce: the guest drains one event, not a queue of samples.
 #include "kudroid/platform/InputShim.h"
+#include "kudroid/platform/GuestClock.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <unistd.h>
+#include <initializer_list>
 
 extern "C" {
 // Injected from the iOS shell. Declared here as the guest's ABI sees them.
 void kudroid_inject_touch_batch(int action, int primaryId, int count, const int* ids,
                                 const float* xs, const float* ys);
+int32_t bionic_AInputEvent_getType(const void*);
+int32_t bionic_AInputEvent_getSource(const void*);
+int32_t bionic_AKeyEvent_getAction(const void*);
+int32_t bionic_AKeyEvent_getKeyCode(const void*);
+int64_t bionic_AKeyEvent_getDownTime(const void*);
+int64_t bionic_AKeyEvent_getEventTime(const void*);
+int64_t bionic_AMotionEvent_getDownTime(const void*);
+int64_t bionic_AMotionEvent_getEventTime(const void*);
+void* bionic_ALooper_prepare(int);
+int bionic_ALooper_pollOnce(int, int*, int*, void**);
+int bionic_ALooper_addFd(void*, int, int, int, void*, void*);
+int bionic_ALooper_removeFd(void*, int);
+void bionic_AInputQueue_attachLooper(void*, void*, int, void*, void*);
+void bionic_AInputQueue_detachLooper(void*);
 int32_t bionic_AInputQueue_getEvent(void* queue, void** outEvent);
 int32_t bionic_AInputQueue_finishEvent(void* queue, void* event, int handled);
 int32_t bionic_AInputQueue_hasEvents(void* queue);
@@ -162,9 +179,114 @@ int main() {
     ev = NextEvent(queue, &got);
     Check(got && bionic_AMotionEvent_getX(ev, 5) == newestX[5],
           "consecutive moves fold into the newest sample");
-    // The event leaves the queue when the guest finishes it, not when it is handed out.
+    // Finished events release their independent storage.
     if (got) Finish(queue, ev);
     Check(!bionic_AInputQueue_hasEvents(queue), "the folded move leaves no residue");
+
+    kudroid_inject_touch_batch(kActionCancel, 0, kWide, ids, xs, ys);
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+    const int64_t before = kudroid::guest_monotonic_ns();
+    kudroid_inject_touch_batch(kActionDown, 0, 1, ids, xs, ys);
+    kudroid_inject_touch_batch(kActionMove, 0, 1, ids, xs, ys);
+    kudroid_inject_touch_batch(kActionMove, 0, 1, ids, xs, ys);
+    kudroid_inject_touch_batch(kActionUp, 0, 1, ids, xs, ys);
+    const int64_t after = kudroid::guest_monotonic_ns();
+    int64_t downTime = 0;
+    for (int action : {kActionDown, kActionMove, kActionUp}) {
+        ev = NextEvent(queue, &got);
+        if (got && action == kActionDown) downTime = bionic_AMotionEvent_getEventTime(ev);
+        Check(got && bionic_AMotionEvent_getAction(ev) == action
+                  && bionic_AMotionEvent_getEventTime(ev) >= before
+                  && bionic_AMotionEvent_getEventTime(ev) <= after
+                  && bionic_AMotionEvent_getDownTime(ev) == downTime,
+              "ordinary motion keeps gesture order, host arrival and down time");
+        if (got) Finish(queue, ev);
+    }
+    kudroid_enqueue_key_event(0, 29, 100000000ll);
+    kudroid_enqueue_key_event(1, 29, 100000000ll);
+    for (int action : {0, 1}) {
+        ev = NextEvent(queue, &got);
+        Check(got && bionic_AInputEvent_getType(ev) == 1 && bionic_AInputEvent_getSource(ev) == 0x101
+                  && bionic_AKeyEvent_getAction(ev) == action && bionic_AKeyEvent_getKeyCode(ev) == 29
+                  && bionic_AKeyEvent_getDownTime(ev) == 100000000ll
+                  && bionic_AKeyEvent_getEventTime(ev) >= 100000000ll,
+              "native key carries type, source, action, code and timestamps");
+        if (got) Finish(queue, ev);
+    }
+
+    void* empty = reinterpret_cast<void*>(1);
+    Check(bionic_AInputQueue_getEvent(queue, &empty) < 0 && empty == nullptr,
+          "empty input queue reports no event instead of successful null input");
+    void* looper = bionic_ALooper_prepare(1);
+    kudroid_inject_touch_batch(kActionDown, 0, 1, ids, xs, ys);
+    kudroid_inject_touch_batch(kActionUp, 0, 1, ids, xs, ys);
+    bionic_AInputQueue_attachLooper(queue, looper, 0, nullptr, nullptr);
+    Check(kudroid_native_input_attached() != 0, "Looper identifier zero is a valid native input attachment");
+    int ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident == 0, "input queued before attach wakes the native Looper");
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+    ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident == 0, "remaining input stays ready after finishing one event");
+    ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident == 0, "polling preserves readiness until the input is consumed");
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+
+    bionic_AInputQueue_detachLooper(queue);
+    int otherPipe[2];
+    if (::pipe(otherPipe) != 0) return 1;
+    bionic_ALooper_addFd(looper, otherPipe[0], 9, 1, nullptr, nullptr);
+    bionic_AInputQueue_attachLooper(queue, looper, 0, nullptr, nullptr);
+    const char byte = 1;
+    if (::write(otherPipe[1], &byte, 1) != 1) return 1;
+    kudroid_inject_touch_batch(kActionDown, 0, 1, ids, xs, ys);
+    ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident == 9, "an earlier ready descriptor can be returned before input");
+    char consumed;
+    if (::read(otherPipe[0], &consumed, 1) != 1) return 1;
+    ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident == 0, "another ready descriptor cannot discard the input wakeup");
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+    ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident == -3, "an empty consumed input queue no longer wakes the Looper");
+    bionic_ALooper_removeFd(looper, otherPipe[0]);
+    ::close(otherPipe[0]);
+    ::close(otherPipe[1]);
+    kudroid_inject_touch_batch(kActionUp, 0, 1, ids, xs, ys);
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+    bionic_AInputQueue_attachLooper(queue, looper, 7, nullptr, nullptr);
+    kudroid_inject_touch_batch(kActionDown, 0, 1, ids, xs, ys);
+    bionic_AInputQueue_detachLooper(queue);
+    Check(kudroid_native_input_attached() == 0, "detach restores Java input routing");
+    ident = bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+    Check(ident < 0, "detached input cannot wake the old Looper");
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+    kudroid_inject_touch_batch(kActionUp, 0, 1, ids, xs, ys);
+    ev = NextEvent(queue, &got); if (got) Finish(queue, ev);
+
+    kudroid_inject_touch_batch(kActionDown, 0, 1, ids, xs, ys);
+    kudroid_inject_touch_batch(kActionUp, 0, 1, ids, xs, ys);
+    const void* first = NextEvent(queue, &got);
+    const void* second = NextEvent(queue, &got);
+    Check(first && second && first != second,
+          "multiple fetched events keep distinct lifetimes until finished");
+    Check(second && bionic_AMotionEvent_getAction(second) == kActionUp,
+          "fetching the next event advances without waiting for the previous finish");
+    if (first && second && first != second) {
+        Check(bionic_AMotionEvent_getAction(first) == kActionDown,
+              "fetching a later event preserves the earlier sample");
+        Finish(queue, second);
+        Check(bionic_AMotionEvent_getAction(first) == kActionDown,
+              "events can be finished out of fetch order");
+        Finish(queue, first);
+        Check(bionic_AInputQueue_finishEvent(queue, const_cast<void*>(first), 1) < 0,
+              "a repeated finish cannot delete another event");
+    } else if (second) {
+        Finish(queue, second);
+    }
+    while (bionic_AInputQueue_hasEvents(queue)) {
+        ev = NextEvent(queue, &got); if (!got) break;
+        Finish(queue, ev);
+    }
 
     return failures ? 1 : 0;
 }

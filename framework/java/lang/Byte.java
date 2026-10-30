@@ -71,6 +71,14 @@ public final class Byte extends Number implements Comparable<Byte> {
     }
 
     public static byte parseByte(String s) {
-        return (byte) Integer.parseInt(s);
+        return parseByte(s, 10);
+    }
+
+    public static byte parseByte(String s, int radix) {
+        int i = Integer.parseInt(s, radix);
+        if (i < MIN_VALUE || i > MAX_VALUE) {
+            throw new NumberFormatException("Value out of range for byte: \"" + s + "\"");
+        }
+        return (byte) i;
     }
 }

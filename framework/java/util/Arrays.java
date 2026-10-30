@@ -257,11 +257,93 @@ public final class Arrays {
         }
     }
 
+    public static void sort(Object[] a) {
+        if (a == null) throw new NullPointerException();
+        sort(a, 0, a.length);
+    }
+
+    public static void sort(Object[] a, int fromIndex, int toIndex) {
+        if (a == null) throw new NullPointerException();
+        rangeCheck(a.length, fromIndex, toIndex);
+        for (int i = fromIndex + 1; i < toIndex; i++) {
+            Object v = a[i];
+            int j = i - 1;
+            while (j >= fromIndex && ((Comparable) a[j]).compareTo(v) > 0) {
+                a[j + 1] = a[j];
+                j--;
+            }
+            a[j + 1] = v;
+        }
+    }
+
     public static <T> void sort(T[] a, Comparator<? super T> c) {
-        for (int i = 1; i < a.length; i++) {
+        if (a == null) throw new NullPointerException();
+        sort(a, 0, a.length, c);
+    }
+
+    public static <T> void sort(T[] a, int fromIndex, int toIndex, Comparator<? super T> c) {
+        if (a == null) throw new NullPointerException();
+        rangeCheck(a.length, fromIndex, toIndex);
+        if (c == null) {
+            sort(a, fromIndex, toIndex);
+            return;
+        }
+        for (int i = fromIndex + 1; i < toIndex; i++) {
             T v = a[i];
             int j = i - 1;
-            while (j >= 0 && c.compare(a[j], v) > 0) {
+            while (j >= fromIndex && c.compare(a[j], v) > 0) {
+                a[j + 1] = a[j];
+                j--;
+            }
+            a[j + 1] = v;
+        }
+    }
+
+    public static void sort(byte[] a) {
+        if (a == null) throw new NullPointerException();
+        for (int i = 1; i < a.length; i++) {
+            byte v = a[i];
+            int j = i - 1;
+            while (j >= 0 && a[j] > v) {
+                a[j + 1] = a[j];
+                j--;
+            }
+            a[j + 1] = v;
+        }
+    }
+
+    public static void sort(short[] a) {
+        if (a == null) throw new NullPointerException();
+        for (int i = 1; i < a.length; i++) {
+            short v = a[i];
+            int j = i - 1;
+            while (j >= 0 && a[j] > v) {
+                a[j + 1] = a[j];
+                j--;
+            }
+            a[j + 1] = v;
+        }
+    }
+
+    public static void sort(float[] a) {
+        if (a == null) throw new NullPointerException();
+        for (int i = 1; i < a.length; i++) {
+            float v = a[i];
+            int j = i - 1;
+            while (j >= 0 && a[j] > v) {
+                a[j + 1] = a[j];
+                j--;
+            }
+            a[j + 1] = v;
+        }
+    }
+
+    public static void sort(double[] a) {
+        if (a == null) throw new NullPointerException();
+        for (int i = 1; i < a.length; i++) {
+            double v = a[i];
+            int j = i - 1;
+            while (j >= 0 && a[j] > v) {
                 a[j + 1] = a[j];
                 j--;
             }
@@ -299,6 +381,118 @@ public final class Arrays {
             }
         }
         return -(lo + 1);
+    }
+
+    public static int binarySearch(Object[] a, Object key) {
+        return binarySearch(a, 0, a.length, key);
+    }
+
+    public static int binarySearch(Object[] a, int fromIndex, int toIndex, Object key) {
+        rangeCheck(a.length, fromIndex, toIndex);
+        int lo = fromIndex;
+        int hi = toIndex - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            int cmp = ((Comparable) a[mid]).compareTo(key);
+            if (cmp < 0) {
+                lo = mid + 1;
+            } else if (cmp > 0) {
+                hi = mid - 1;
+            } else {
+                return mid;
+            }
+        }
+        return -(lo + 1);
+    }
+
+    public static <T> int binarySearch(T[] a, T key, Comparator<? super T> c) {
+        return binarySearch(a, 0, a.length, key, c);
+    }
+
+    public static <T> int binarySearch(T[] a, int fromIndex, int toIndex, T key, Comparator<? super T> c) {
+        rangeCheck(a.length, fromIndex, toIndex);
+        if (c == null) return binarySearch(a, fromIndex, toIndex, key);
+        int lo = fromIndex;
+        int hi = toIndex - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            int cmp = c.compare(a[mid], key);
+            if (cmp < 0) {
+                lo = mid + 1;
+            } else if (cmp > 0) {
+                hi = mid - 1;
+            } else {
+                return mid;
+            }
+        }
+        return -(lo + 1);
+    }
+
+    public static int binarySearch(byte[] a, byte key) {
+        int lo = 0, hi = a.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (a[mid] < key) lo = mid + 1;
+            else if (a[mid] > key) hi = mid - 1;
+            else return mid;
+        }
+        return -(lo + 1);
+    }
+
+    public static int binarySearch(char[] a, char key) {
+        int lo = 0, hi = a.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (a[mid] < key) lo = mid + 1;
+            else if (a[mid] > key) hi = mid - 1;
+            else return mid;
+        }
+        return -(lo + 1);
+    }
+
+    public static int binarySearch(short[] a, short key) {
+        int lo = 0, hi = a.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (a[mid] < key) lo = mid + 1;
+            else if (a[mid] > key) hi = mid - 1;
+            else return mid;
+        }
+        return -(lo + 1);
+    }
+
+    public static int binarySearch(float[] a, float key) {
+        int lo = 0, hi = a.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (a[mid] < key) lo = mid + 1;
+            else if (a[mid] > key) hi = mid - 1;
+            else return mid;
+        }
+        return -(lo + 1);
+    }
+
+    public static int binarySearch(double[] a, double key) {
+        int lo = 0, hi = a.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (a[mid] < key) lo = mid + 1;
+            else if (a[mid] > key) hi = mid - 1;
+            else return mid;
+        }
+        return -(lo + 1);
+    }
+
+    private static void rangeCheck(int arrayLength, int fromIndex, int toIndex) {
+        if (fromIndex > toIndex) {
+            throw new IllegalArgumentException("fromIndex(" + fromIndex + ") > toIndex(" + toIndex + ")");
+        }
+        if (fromIndex < 0) {
+            throw new ArrayIndexOutOfBoundsException(fromIndex);
+        }
+        if (toIndex > arrayLength) {
+            throw new ArrayIndexOutOfBoundsException(toIndex);
+        }
     }
 
     private static void insertionSortInt(int[] a, int from, int to) {
