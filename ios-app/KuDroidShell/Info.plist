@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleVersion</key>
-    <string>14</string>
+    <string>15</string>
     <key>CFBundleShortVersionString</key>
-    <string>T1.4</string>
+    <string>T1.5</string>
     <key>CFBundleDisplayName</key>
     <string>KuDroid</string>
     <key>CFBundleName</key>

@@ -11,6 +11,10 @@ public class IntentFilter implements Parcelable {
 
     public IntentFilter() {}
     public IntentFilter(String action) { addAction(action); }
+    public IntentFilter(IntentFilter other) {
+        mActions.addAll(other.mActions);
+        mCategories.addAll(other.mCategories);
+    }
     public void addAction(String action) { if (!mActions.contains(action)) mActions.add(action); }
     public boolean hasAction(String action) { return mActions.contains(action); }
     public int countActions() { return mActions.size(); }

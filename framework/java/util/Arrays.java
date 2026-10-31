@@ -119,28 +119,38 @@ public final class Arrays {
     }
 
     public static int[] copyOfRange(int[] a, int from, int to) {
-        int[] out = new int[to - from];
-        System.arraycopy(a, from, out, 0, to - from);
+        int length = rangeLength(from, to);
+        int[] out = new int[length];
+        System.arraycopy(a, from, out, 0, Math.min(a.length - from, length));
         return out;
     }
 
     public static byte[] copyOfRange(byte[] a, int from, int to) {
-        byte[] out = new byte[to - from];
-        System.arraycopy(a, from, out, 0, to - from);
+        int length = rangeLength(from, to);
+        byte[] out = new byte[length];
+        System.arraycopy(a, from, out, 0, Math.min(a.length - from, length));
         return out;
     }
 
     public static char[] copyOfRange(char[] a, int from, int to) {
-        char[] out = new char[to - from];
-        System.arraycopy(a, from, out, 0, to - from);
+        int length = rangeLength(from, to);
+        char[] out = new char[length];
+        System.arraycopy(a, from, out, 0, Math.min(a.length - from, length));
         return out;
     }
 
     public static <T> T[] copyOfRange(T[] a, int from, int to) {
+        int length = rangeLength(from, to);
         T[] out = (T[]) java.lang.reflect.Array.newInstance(
-                a.getClass().getComponentType(), to - from);
-        System.arraycopy(a, from, out, 0, to - from);
+                a.getClass().getComponentType(), length);
+        System.arraycopy(a, from, out, 0, Math.min(a.length - from, length));
         return out;
+    }
+
+    private static int rangeLength(int from, int to) {
+        int length = to - from;
+        if (length < 0) throw new IllegalArgumentException(from + " > " + to);
+        return length;
     }
 
     public static boolean equals(int[] a, int[] b) {
@@ -212,6 +222,13 @@ public final class Arrays {
             h = 31 * h + a[i];
         }
         return h;
+    }
+
+    public static int hashCode(byte[] a) {
+        if (a == null) return 0;
+        int hash = 1;
+        for (byte value : a) hash = 31 * hash + value;
+        return hash;
     }
 
     public static int hashCode(Object[] a) {

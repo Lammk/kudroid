@@ -18,6 +18,9 @@ class DexClassLinker;
 class DexObject;
 class DexArray;
 
+bool Invoke_libcore_io_Memory(Interpreter* interp, const char* name, const DexValue* args,
+                             size_t num_args, DexValue* result);
+
 // Run the libcore implementation of `method` if present; false means the caller
 // must resolve the app's own native symbol.
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,

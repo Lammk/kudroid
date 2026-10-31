@@ -50,6 +50,8 @@ for arg in "$@"; do
 done
 
 cd "${ROOT_DIR}"
+python3 scripts/flutter-runtime/verify-asset.py --asset ios-app/KuDroidShell/Resources/runtime
+python3 scripts/verify-system-fonts.py
 
 if [ "${DO_CLEAN}" = true ]; then
     echo "==> Cleaning build artifacts..."
@@ -93,6 +95,8 @@ else
     xtool dev build --ipa -c "${CONFIG}"
     IPA_PATH="${ROOT_DIR}/ios-app/KuDroidShell/xtool/KuDroidShell.ipa"
     python3 "${ROOT_DIR}/scripts/embed_standalone_launcher.py" "${IPA_PATH}"
+    python3 "${ROOT_DIR}/scripts/flutter-runtime/verify-asset.py" "${IPA_PATH}"
+    python3 "${ROOT_DIR}/scripts/verify-system-fonts.py" "${IPA_PATH}"
     echo ""
     echo "========================================================"
     echo " BUILD SUCCESSFUL!"

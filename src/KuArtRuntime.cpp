@@ -510,6 +510,13 @@ extern "C" int kuart_init(const char* app_dir) {
                                                rt->jni.get());
     if (g_symbol_lookup != nullptr) rt->jni->set_symbol_lookup(g_symbol_lookup);
 
+    // Record process clocks before native library initialization.
+    DexClass* process = rt->linker.FindClass("Landroid/os/Process;");
+    if (process == nullptr || !rt->interpreter->EnsureInitialized(process)) {
+        SetError("Failed to initialize process clocks");
+        return 0;
+    }
+
     // The JIT profile lives beside the app's DEX, so it is discarded with the app and
     // cannot be applied to a different one. Absent on first run, which is not an error.
     if (app_dir != nullptr && app_dir[0] != '\0') {
@@ -688,6 +695,36 @@ extern "C" void kuart_register_component_meta_data(const char* component_name,
                         "registerComponentMetaData",
                         "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
                         args, 3);
+}
+
+extern "C" void kuart_register_component_meta_data_typed(const char* component_name,
+                                                        const char* const* keys,
+                                                        const char* const* values,
+                                                        const int* types, int count) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    if (count < 0 || (count > 0 && types == nullptr)) {
+        SetError("kuart_register_component_meta_data_typed: invalid type array");
+        return;
+    }
+    DexArray* keyArr = NewStringArray(keys, count);
+    DexArray* valArr = NewStringArray(values, count);
+    DexClass* intArray = g_rt->linker.FindClass("[I");
+    DexArray* typeArr = intArray ? g_rt->linker.AllocArray(intArray, count) : nullptr;
+    if (keyArr == nullptr || valArr == nullptr || typeArr == nullptr) {
+        SetError("kuart_register_component_meta_data_typed: array allocation failed");
+        return;
+    }
+    for (int i = 0; i < count; ++i) typeArr->Set<int32_t>(i, types[i]);
+    DexObject* name = reinterpret_cast<DexObject*>(
+        g_rt->linker.NewString(component_name != nullptr ? component_name : ""));
+    const DexValue args[4] = {
+        DexValue::Ref(name), DexValue::Ref(reinterpret_cast<DexObject*>(keyArr)),
+        DexValue::Ref(reinterpret_cast<DexObject*>(valArr)),
+        DexValue::Ref(reinterpret_cast<DexObject*>(typeArr))
+    };
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;",
+                        "registerComponentMetaDataTyped",
+                        "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;[I)V", args, 4);
 }
 
 extern "C" void kuart_register_package(const char* package_name,

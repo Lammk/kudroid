@@ -56,7 +56,14 @@ public class ApplicationInfo implements Parcelable {
     public static final int FLAG_SUPPORTS_RTL = 1<<22;
 
     public ApplicationInfo() {}
-    public CharSequence loadLabel(PackageManager pm) { return packageName; }
+    public CharSequence loadLabel(PackageManager pm) {
+        if (nonLocalizedLabel != null) return nonLocalizedLabel;
+        if (labelRes != 0) {
+            CharSequence label = pm.getText(packageName, labelRes, this);
+            if (label != null) return label.toString().trim();
+        }
+        return name != null ? name : packageName;
+    }
     public int describeContents() { return 0; }
     public void writeToParcel(Parcel dest, int flags) {}
 }

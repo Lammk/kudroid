@@ -288,4 +288,12 @@ public final class Long extends Number implements Comparable<Long> {
         int d = distance & 63;
         return (l >>> d) | (l << (64 - d));
     }
+    public static long reverseBytes(long value) {
+        long result = 0;
+        for (int i = 0; i < 8; i++) {
+            result = (long) ((result << 8) | (value & 255));
+            value = (long) (value >>> 8);
+        }
+        return result;
+    }
 }

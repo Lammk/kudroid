@@ -78,10 +78,14 @@ uint32_t SelfThreadId();
 void Enter(DexObject* obj);
 
 bool Exit(DexObject* obj);
+bool IsOwned(DexObject* obj);
 
 // Releases the monitor entirely, waits to be notified, then re-acquires it with
 // the same recursion count. `millis == 0 && nanos == 0` waits indefinitely.
-bool Wait(DexObject* obj, int64_t millis, int32_t nanos);
+bool Wait(DexObject* obj, int64_t millis, int32_t nanos, DexObject* thread = nullptr);
+
+// Wake waits belonging to the interrupted Java thread.
+void Interrupt(DexObject* thread);
 
 bool Notify(DexObject* obj, bool all);
 

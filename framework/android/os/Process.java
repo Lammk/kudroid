@@ -1,6 +1,15 @@
 package android.os;
 
 public class Process {
+    private static long sStartElapsedRealtime = SystemClock.elapsedRealtime();
+    private static long sStartUptimeMillis = SystemClock.uptimeMillis();
+
+    public static synchronized long getStartElapsedRealtime() { return sStartElapsedRealtime; }
+    public static synchronized long getStartUptimeMillis() { return sStartUptimeMillis; }
+    public static synchronized void setStartTimes(long elapsedRealtime, long uptimeMillis) {
+        sStartElapsedRealtime = elapsedRealtime;
+        sStartUptimeMillis = uptimeMillis;
+    }
     public static final int SYSTEM_UID = 1000;
     public static final int PHONE_UID = 1001;
     public static final int FIRST_APPLICATION_UID = 10000;

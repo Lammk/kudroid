@@ -85,7 +85,6 @@ extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
     for (const auto& part : relative) {
         if (part == "." || part == "..") return 0;
     }
-    if (relative.has_parent_path() && std::strncmp(entry, "res/", 4) != 0) return 0;
 
     const std::string assetsDir = kudroid::kudroid_get_assets_dir_cpp();
     if (assetsDir.empty()) return 0;
@@ -94,7 +93,7 @@ extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
     std::error_code ec;
     if (std::filesystem::is_regular_file(loose, ec)) {
         const auto size = std::filesystem::file_size(loose, ec);
-        if (ec || size == 0 || size > static_cast<uint64_t>(INT64_MAX)) return 0;
+        if (ec || size > static_cast<uint64_t>(INT64_MAX)) return 0;
         const std::string path = loose.string();
         char* copy = static_cast<char*>(std::malloc(path.size() + 1));
         if (copy == nullptr) return -1;
@@ -109,7 +108,7 @@ extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
     if (!std::filesystem::is_regular_file(apk, ec)) return 0;
     uint64_t offset = 0, size = 0;
     uint16_t method = 0;
-    if (!zip_stat_entry(apk.string(), entry, &offset, &size, &method) || size == 0 ||
+    if (!zip_stat_entry(apk.string(), entry, &offset, &size, &method) ||
         size > static_cast<uint64_t>(INT64_MAX) || offset > static_cast<uint64_t>(INT64_MAX)) return 0;
 
     std::string backingPath;

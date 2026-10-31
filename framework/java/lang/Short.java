@@ -81,4 +81,12 @@ public final class Short extends Number implements Comparable<Short> {
         }
         return (short) i;
     }
+    public static short reverseBytes(short value) {
+        short result = 0;
+        for (int i = 0; i < 2; i++) {
+            result = (short) ((result << 8) | (value & 255));
+            value = (short) (value >>> 8);
+        }
+        return result;
+    }
 }

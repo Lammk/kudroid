@@ -78,6 +78,38 @@ public abstract class ByteBuffer extends Buffer implements Comparable<ByteBuffer
     public double getDouble(int index) { return Double.longBitsToDouble(getLong(index)); }
     public double getDouble() { return Double.longBitsToDouble(getLong()); }
 
+    private ByteBuffer writeNumber(int index, long value, int bytes) {
+        if (isReadOnly()) throw new ReadOnlyBufferException();
+        if (index < 0 || index > limit() - bytes) throw new IndexOutOfBoundsException();
+        for (int i = 0; i < bytes; i++) {
+            int at = order == ByteOrder.BIG_ENDIAN ? index + bytes - 1 - i : index + i;
+            put(at, (byte) (value >>> (i * 8)));
+        }
+        return this;
+    }
+
+    private ByteBuffer writeNumber(long value, int bytes) {
+        if (isReadOnly()) throw new ReadOnlyBufferException();
+        if (remaining() < bytes) throw new BufferOverflowException();
+        int index = position();
+        writeNumber(index, value, bytes);
+        position(index + bytes);
+        return this;
+    }
+
+    public ByteBuffer putShort(int index, short value) { return writeNumber(index, value, 2); }
+    public ByteBuffer putShort(short value) { return writeNumber(value, 2); }
+    public ByteBuffer putChar(int index, char value) { return writeNumber(index, value, 2); }
+    public ByteBuffer putChar(char value) { return writeNumber(value, 2); }
+    public ByteBuffer putInt(int index, int value) { return writeNumber(index, value, 4); }
+    public ByteBuffer putInt(int value) { return writeNumber(value, 4); }
+    public ByteBuffer putLong(int index, long value) { return writeNumber(index, value, 8); }
+    public ByteBuffer putLong(long value) { return writeNumber(value, 8); }
+    public ByteBuffer putFloat(int index, float value) { return putInt(index, Float.floatToRawIntBits(value)); }
+    public ByteBuffer putFloat(float value) { return putInt(Float.floatToRawIntBits(value)); }
+    public ByteBuffer putDouble(int index, double value) { return putLong(index, Double.doubleToRawLongBits(value)); }
+    public ByteBuffer putDouble(double value) { return putLong(Double.doubleToRawLongBits(value)); }
+
     public ByteBuffer get(byte[] dst, int offset, int length) {
         if (offset < 0 || length < 0 || offset + length > dst.length) throw new IndexOutOfBoundsException();
         if (length > remaining()) throw new BufferUnderflowException();

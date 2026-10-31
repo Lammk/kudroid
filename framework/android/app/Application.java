@@ -14,6 +14,11 @@ public class Application extends ContextWrapper implements android.content.Compo
         super(null);
     }
 
+    public static String getProcessName() {
+        String name = ActivityThread.getPackageName();
+        return name == null || name.isEmpty() ? null : name;
+    }
+
     /**
      * is called when the application is starting.
      */

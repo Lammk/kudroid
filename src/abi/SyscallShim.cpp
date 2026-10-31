@@ -1,6 +1,8 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/abi/SyscallShim.h"
+#include "kudroid/abi/Sendfile.h"
+#include "kudroid/abi/TimerDeadline.h"
 #include "kudroid/abi/SocketAbi.h"
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/abi/BlockingWaitRegistry.h"
@@ -4909,26 +4911,6 @@ extern "C" int bionic_sigismember(const void* set, int sig) {
     return (*static_cast<const uint64_t*>(set) & (1ull << (sig - 1))) != 0 ? 1 : 0;
 }
 
-// sendfile: macOS signature khc hn Linux — emulate bng pread/write loop.
-extern "C" ssize_t bionic_sendfile(int out_fd, int in_fd, off_t* offset, size_t count) {
-    off_t pos = offset ? *offset : ::lseek(in_fd, 0, SEEK_CUR);
-    if (pos < 0) return -1;
-    char buf[65536];
-    size_t total = 0;
-    while (total < count) {
-        const size_t chunk = std::min(sizeof(buf), count - total);
-        const ssize_t n = ::pread(in_fd, buf, chunk, pos);
-        if (n <= 0) break;
-        const ssize_t w = ::write(out_fd, buf, static_cast<size_t>(n));
-        if (w <= 0) break;
-        pos += w;
-        total += static_cast<size_t>(w);
-        if (static_cast<size_t>(w) != static_cast<size_t>(n)) break;
-    }
-    if (offset) *offset = pos;
-    return static_cast<ssize_t>(total);
-}
-
 extern "C" int bionic_sched_getscheduler(pid_t pid) {
     (void)pid;
     return 0; // SCHED_OTHER
@@ -6143,8 +6125,9 @@ static int create_loopback_udp() {
     return fd;
 }
 
-// For timerfd, we keep a map of fd to GCD timer
+// Keep the guest clock for absolute timer deadlines, including disarmed timers.
 static std::map<int, dispatch_source_t> g_timerfds;
+static std::map<int, int> g_timerfd_clocks;
 static std::mutex g_timerfds_mtx;
 #endif
 
@@ -6174,11 +6157,15 @@ extern "C" int bionic_eventfd(unsigned int initval, int flags) {
 
 extern "C" int bionic_timerfd_create(int clockid, int flags) {
 #ifdef __APPLE__
-    (void)clockid; (void)flags;
+    (void)flags;
+    timespec now{};
+    if (bionic_clock_gettime(clockid, &now) != 0) return -1;
     const int fd = create_loopback_udp();
     if (fd >= 0) {
-        // Emulated fd (loopback UDP + GCD timer) — register bionic_close
-        // bookkeeping y (ging inotify/signalfd).
+        {
+            std::lock_guard<std::mutex> lock(g_timerfds_mtx);
+            g_timerfd_clocks.emplace(fd, clockid);
+        }
         std::lock_guard<std::mutex> lock(g_fakefds_mtx);
         g_fakefds.insert(fd);
     }
@@ -6195,26 +6182,45 @@ struct bionic_itimerspec {
 
 extern "C" int bionic_timerfd_settime(int fd, int flags, const struct bionic_itimerspec *new_value, struct bionic_itimerspec *old_value) {
 #ifdef __APPLE__
-    (void)flags; (void)old_value;
-    if (fd < 0 || !new_value) return -1;
+    (void)old_value;
+    if (!new_value) { errno = EFAULT; return -1; }
+    const auto valid_time = [](const timespec& value) {
+        return value.tv_sec >= 0 && value.tv_nsec >= 0 && value.tv_nsec < 1000000000;
+    };
+    if (!valid_time(new_value->it_value) || !valid_time(new_value->it_interval)) {
+        errno = EINVAL;
+        return -1;
+    }
     
     std::lock_guard<std::mutex> lock(g_timerfds_mtx);
+    const auto clock = g_timerfd_clocks.find(fd);
+    if (clock == g_timerfd_clocks.end()) {
+        errno = fd < 0 || ::fcntl(fd, F_GETFD) < 0 ? EBADF : EINVAL;
+        return -1;
+    }
+    timespec now{};
+    if ((flags & 1) && bionic_clock_gettime(clock->second, &now) != 0) return -1;
+    const int64_t start = kudroid::timer_deadline_delay_ns(new_value->it_value, now, flags & 1);
+    const uint64_t interval_ns = static_cast<uint64_t>(
+        kudroid::timer_deadline_delay_ns(new_value->it_interval, timespec{}, false));
+    const uint64_t interval = interval_ns == 0 ? DISPATCH_TIME_FOREVER : interval_ns;
+    const bool disarm = new_value->it_value.tv_sec == 0 && new_value->it_value.tv_nsec == 0;
+    dispatch_source_t timer = disarm ? nullptr : dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+    if (!disarm && !timer) { errno = ENOMEM; return -1; }
     if (g_timerfds.count(fd)) {
         dispatch_source_cancel(g_timerfds[fd]);
+        dispatch_release(g_timerfds[fd]);
         g_timerfds.erase(fd);
     }
     
-    if (new_value->it_value.tv_sec == 0 && new_value->it_value.tv_nsec == 0) {
-        return 0; // disarm
-    }
-    
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
-    uint64_t start = new_value->it_value.tv_sec * 1000000000ull + new_value->it_value.tv_nsec;
-    uint64_t interval = new_value->it_interval.tv_sec * 1000000000ull + new_value->it_interval.tv_nsec;
-    if (interval == 0) interval = DISPATCH_TIME_FOREVER;
+    if (disarm) return 0;
     
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, start), interval, 1000000); // 1ms leeway
     dispatch_source_set_event_handler(timer, ^{
+        std::lock_guard<std::mutex> lock(g_timerfds_mtx);
+        const auto active = g_timerfds.find(fd);
+        if (active == g_timerfds.end() || active->second != timer) return;
         uint64_t exp = 1;
         write(fd, &exp, sizeof(exp));
     });
@@ -6253,6 +6259,7 @@ extern "C" int bionic_close(int fd) {
 #ifdef __APPLE__
     {
         std::lock_guard<std::mutex> lock(g_timerfds_mtx);
+        g_timerfd_clocks.erase(fd);
         auto it = g_timerfds.find(fd);
         if (it != g_timerfds.end()) {
             dispatch_source_cancel(it->second);
@@ -9242,6 +9249,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"usleep", reinterpret_cast<void*>(&bionic_usleep)},
     {"tgkill", reinterpret_cast<void*>(&bionic_tgkill)},
     {"sendfile", reinterpret_cast<void*>(&bionic_sendfile)},
+    {"sendfile64", reinterpret_cast<void*>(&bionic_sendfile)},
     {"sched_getscheduler", reinterpret_cast<void*>(&bionic_sched_getscheduler)},
     {"sched_setscheduler", reinterpret_cast<void*>(&bionic_sched_setscheduler)},
     {"sched_getparam", reinterpret_cast<void*>(&bionic_sched_getparam)},

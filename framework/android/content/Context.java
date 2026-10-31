@@ -17,6 +17,7 @@ import java.io.IOException;
 
 public abstract class Context {
     private android.view.LayoutInflater mLayoutInflater;
+    private Handler mReceiverHandler;
     // File and preference modes. MODE_APPEND is the one with a value that matters here —
     // openFileOutput() below tests for it; the rest are the documented constants apps pass
     // to getSharedPreferences and would otherwise fail to resolve at all.
@@ -183,6 +184,18 @@ public abstract class Context {
     /** The main thread's Looper, which every lifecycle callback runs on. */
     public android.os.Looper getMainLooper() {
         return android.os.Looper.getMainLooper();
+    }
+
+    public java.util.concurrent.Executor getMainExecutor() {
+        final Handler handler = new Handler(getMainLooper());
+        return new java.util.concurrent.Executor() {
+            public void execute(Runnable command) {
+                if (command == null) throw new NullPointerException();
+                if (!handler.post(command)) {
+                    throw new java.util.concurrent.RejectedExecutionException("Main looper is shutting down");
+                }
+            }
+        };
     }
 
     /**
@@ -469,9 +482,33 @@ public abstract class Context {
     public int checkSelfPermission(String permission) {
         return android.content.pm.RuntimePermissions.check(getPackageName(), permission);
     }
-    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { return null; }
-    public void unregisterReceiver(BroadcastReceiver receiver) {}
-    public void sendBroadcast(Intent intent) {}
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) {
+        return registerReceiver(receiver, filter, null, null);
+    }
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter,
+                                   String broadcastPermission, Handler scheduler) {
+        if (filter == null) throw new NullPointerException("filter == null");
+        if (receiver == null) return null;
+        if (scheduler == null) {
+            synchronized (this) {
+                if (mReceiverHandler == null) {
+                    Looper main = getMainLooper();
+                    if (main == null) throw new IllegalStateException("Main Looper is not prepared");
+                    mReceiverHandler = new Handler(main);
+                }
+                scheduler = mReceiverHandler;
+            }
+        }
+        BroadcastRegistry.register(this, receiver, filter, broadcastPermission, scheduler);
+        return null;
+    }
+    public void unregisterReceiver(BroadcastReceiver receiver) {
+        BroadcastRegistry.unregister(this, receiver);
+    }
+    public void sendBroadcast(Intent intent) { sendBroadcast(intent, null); }
+    public void sendBroadcast(Intent intent, String receiverPermission) {
+        BroadcastRegistry.send(this, intent, receiverPermission);
+    }
     public void registerComponentCallbacks(ComponentCallbacks callback) {}
     public void unregisterComponentCallbacks(ComponentCallbacks callback) {}
 

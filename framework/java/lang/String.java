@@ -59,6 +59,33 @@ public final class String implements CharSequence, Comparable<String> {
 
     public native char charAt(int index);
 
+    public int codePointAt(int index) {
+        char first = charAt(index);
+        if (first >= '\uD800' && first <= '\uDBFF' && index < length() - 1) {
+            char second = charAt(index + 1);
+            if (second >= '\uDC00' && second <= '\uDFFF')
+                return ((first - '\uD800') << 10) + (second - '\uDC00') + 0x10000;
+        }
+        return first;
+    }
+
+    public int codePointCount(int beginIndex, int endIndex) {
+        if (beginIndex < 0 || endIndex > length() || beginIndex > endIndex)
+            throw new IndexOutOfBoundsException();
+        int count = endIndex - beginIndex;
+        for (int i = beginIndex; i < endIndex; i++) {
+            char first = charAt(i);
+            if (first >= '\uD800' && first <= '\uDBFF' && i + 1 < endIndex) {
+                char second = charAt(i + 1);
+                if (second >= '\uDC00' && second <= '\uDFFF') {
+                    i++;
+                    count--;
+                }
+            }
+        }
+        return count;
+    }
+
     public native int indexOf(int ch, int fromIndex);
 
     public native int lastIndexOf(int ch, int fromIndex);

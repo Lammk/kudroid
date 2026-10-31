@@ -1,6 +1,10 @@
 #pragma once
+
 #include "ShimDefs.h"
 #include <cstdint>
+
+extern "C" int64_t kudroid_surface_set_frame(int64_t handle, int x, int y, int width, int height);
+extern "C" void bionic_ANativeWindow_release(void* window);
 
 namespace kudroid {
 const SymbolEntry* get_graphics_symbols(size_t* count);

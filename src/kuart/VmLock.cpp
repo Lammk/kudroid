@@ -74,6 +74,7 @@ std::mutex g_monitor_mutex;
 struct WaitTicket {
     std::condition_variable cv;
     bool notified = false;
+    DexObject* thread = nullptr;
 };
 struct MonitorState {
     std::condition_variable entry_cv;
@@ -217,12 +218,19 @@ bool Exit(DexObject* obj) {
     return true;
 }
 
-bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
+bool IsOwned(DexObject* obj) {
+    if (obj == nullptr) return false;
+    std::lock_guard<std::mutex> lock(g_monitor_mutex);
+    return obj->lock_owner_tid == SelfThreadId() && obj->lock_count != 0;
+}
+
+bool Wait(DexObject* obj, int64_t millis, int32_t nanos, DexObject* thread) {
     if (obj == nullptr) return false;
     const uint32_t self = SelfThreadId();
 
     uint32_t saved_count;
     WaitTicket ticket;
+    ticket.thread = thread;
     std::shared_ptr<MonitorState> state;
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
@@ -276,6 +284,19 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
     }
     --g_monitorWaiters;
     return true;
+}
+
+void Interrupt(DexObject* thread) {
+    if (thread == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_monitor_mutex);
+    for (const auto& entry : g_monitor_states) {
+        for (WaitTicket* ticket : entry.second->waits) {
+            if (ticket->thread == thread) {
+                ticket->notified = true;
+                ticket->cv.notify_one();
+            }
+        }
+    }
 }
 
 bool Notify(DexObject* obj, bool all) {

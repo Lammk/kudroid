@@ -165,8 +165,11 @@ public final class MessageQueue {
      * Returns the next message ready to be executed, or null if the queue is quitting.
      */
     Message next() {
-        // Host events must also enter the queue while Java messages stay ready.
-        if (mPtr != 0) nativeDrainInput(mPtr);
+        // Service native callbacks even while Java messages remain ready.
+        if (mPtr != 0) {
+            nativePollOnce(mPtr, 0);
+            nativeDrainInput(mPtr);
+        }
         // Idle handlers run at most once per wakeup: without this a
         // staying-registered handler re-runs every loop with no wait in
         // between (spin). The flag resets on every wait below.

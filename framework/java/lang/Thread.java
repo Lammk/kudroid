@@ -1,9 +1,6 @@
 package java.lang;
 
-/**
- * Real thread created by KuART using pthread. Only start/join/sleep supported — no
- * has thread group, real priority or asynchronous interrupt.
- */
+/** Threads backed by native workers with monitor-based blocking. */
 public class Thread implements Runnable {
 
     public static final int MIN_PRIORITY = 1;
@@ -20,6 +17,7 @@ public class Thread implements Runnable {
 
     private static UncaughtExceptionHandler defaultHandler;
     private static int threadSeq;
+    private static Thread mainThread;
 
     private Runnable target;
     private String name;

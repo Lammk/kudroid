@@ -2,3 +2,8 @@ version: 1
 bundleID: com.kudroid.shell
 iconPath: ../../icon.png
 infoPath: Info.plist
+entitlementsPath: ../entitlements.plist
+resources:
+  - ../entitlements.plist
+  - Resources/runtime
+  - Resources/system

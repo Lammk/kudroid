@@ -7,9 +7,8 @@ KuDroid is a translation layer for ios to run android's apps
 
 ---
 
-### How it was made
-This project is **vibecoded** by AI (write the code) and me just leading it.  
-*(Yeah, I vibecoded this. Please don't send me death threats)*
+### How it was made.
+I vibecoded this. Please don't execute me
 
 ---
 

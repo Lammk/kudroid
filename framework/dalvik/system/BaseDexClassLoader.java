@@ -35,6 +35,7 @@ public class BaseDexClassLoader extends ClassLoader {
      * something that fails to open.
      */
     private static native String findLibraryPath(String name);
+    private static native Object[] findResourceBacking(String name);
 
     public BaseDexClassLoader(String dexPath, java.io.File optimizedDirectory,
             String librarySearchPath, ClassLoader parent) {
@@ -68,6 +69,52 @@ public class BaseDexClassLoader extends ClassLoader {
 
     public String getLdLibraryPath() {
         return mLibrarySearchPath != null ? mLibrarySearchPath : "";
+    }
+
+    @Override
+    protected java.net.URL findResource(String name) {
+        if (name == null) throw new NullPointerException("name == null");
+        Object[] backing = findResourceBacking(name);
+        if (backing == null) return null;
+        final String path = (String) backing[0];
+        final long start = (Long) backing[1];
+        final long length = (Long) backing[2];
+        try {
+            String spec = new java.net.URI("file", "", path, null).toASCIIString();
+            if (start > 0) {
+                String entry = new java.net.URI(null, null, "/" + name, null)
+                        .getRawPath().substring(1);
+                spec = "jar:" + spec + "!/" + entry;
+            }
+            return new java.net.URL(null, spec, new java.net.URLStreamHandler() {
+                protected java.net.URLConnection openConnection(java.net.URL url) {
+                    return new java.net.URLConnection(url) {
+                        public void connect() { connected = true; }
+                        public long getContentLengthLong() { return length; }
+                        public java.io.InputStream getInputStream() throws java.io.IOException {
+                            java.io.FileInputStream input = new java.io.FileInputStream(path);
+                            try {
+                                long skipped = 0;
+                                while (skipped < start) {
+                                    long count = input.skip(start - skipped);
+                                    if (count <= 0) throw new java.io.EOFException(path);
+                                    skipped += count;
+                                }
+                                connected = true;
+                                return new android.content.res.AssetManager.BoundedInputStream(input, length);
+                            } catch (java.io.IOException exception) {
+                                input.close();
+                                throw exception;
+                            }
+                        }
+                    };
+                }
+            });
+        } catch (java.net.URISyntaxException exception) {
+            return null;
+        } catch (java.net.MalformedURLException exception) {
+            return null;
+        }
     }
 
     @Override

@@ -27,9 +27,8 @@ extern "C" {
 // Set the directory containing extracted assets (called from kudroid_run_apk / kudroid_load_apk).
 void kudroid_set_assets_dir(const char* dir);
 
-// Resolve an exact root package file (for example resources.arsc), not an entry in
-// the assets/ namespace. The returned path is malloc-owned by the caller. Offset and
-// length bound the bytes in that backing file.
+// Resolve an exact package entry. The caller owns the malloc-allocated path;
+// offset and length bound its bytes in the backing file.
 int kudroid_package_resolve_bytes(const char* entry, char** outPath,
                                   int64_t* outOffset, int64_t* outLength);
 

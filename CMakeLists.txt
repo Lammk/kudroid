@@ -118,11 +118,14 @@ add_library(kudroid_core STATIC
     src/APKExtractor.cpp
     src/BionicShim.cpp
     src/VFSPathRemapper.cpp
+    src/platform/SystemFonts.cpp
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
+    src/ElfPackedRelocations.cpp
     src/ExecMemory.cpp
     src/elf_x18.cpp
     src/library_manager.cpp
+    src/FlutterRuntime.cpp
     src/platform/InputShim.cpp
     src/platform/ArchiveExport.cpp
     src/platform/NativeTouchGate.cpp
@@ -131,6 +134,7 @@ add_library(kudroid_core STATIC
     # compiles bits/stdio.h against an incomplete FILE when it does).
     src/platform/NativeLooper.cpp
     src/platform/AudioShim.cpp
+    src/platform/OpenSlShim.cpp
     src/platform/AudioCapture.cpp
     src/platform/CameraShim.cpp
     src/platform/NetworkState.cpp
@@ -145,6 +149,7 @@ add_library(kudroid_core STATIC
     # because it owns a thread and a set of pipes, and nothing else in there does.
     src/platform/FramePacer.cpp
     src/abi/SyscallShim.cpp
+    src/abi/Sendfile.cpp
     src/abi/SocketAbi.cpp
     src/abi/GuestVarargs.cpp
     src/abi/BlockingWaitRegistry.cpp
@@ -178,6 +183,8 @@ add_library(kudroid_core STATIC
     src/kuart/jni_trampoline.S
     src/kuart/DexReflect.cpp
     src/kuart/LibCore.cpp
+    src/kuart/LibMemory.cpp
+    src/platform/FileObserverHost.cpp
     src/kuart/LibNet.cpp
     src/kuart/LibTls.cpp
     src/kuart/LibZip.cpp
@@ -250,6 +257,7 @@ target_include_directories(kudroid_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+target_include_directories(kudroid_core SYSTEM PRIVATE third_party/android_headers)
 
 # kudroid_core uses Apple frameworks (AudioQueue -> AudioToolbox,
 # kCFRunLoopCommonModes -> CoreFoundation, NSException/objc runtime ->
@@ -282,6 +290,15 @@ target_compile_options(kudroid_core PRIVATE
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     enable_language(Swift)
+    add_custom_target(kudroid_flutter_runtime_check
+        COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flutter-runtime/verify-asset.py"
+            --asset "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/KuDroidShell/Resources/runtime"
+        VERBATIM)
+    add_dependencies(kudroid_core kudroid_flutter_runtime_check)
+    add_custom_target(kudroid_system_fonts_check
+        COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify-system-fonts.py"
+        VERBATIM)
+    add_dependencies(kudroid_core kudroid_system_fonts_check)
     
     # Define the iOS Application Target
     add_executable(KuDroidShell MACOSX_BUNDLE
@@ -300,10 +317,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/NetworkBridge.swift
         ios-app/KuDroidShell/kudroid_bridge.h
         ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
+        ios-app/KuDroidShell/Resources/runtime/libflutter.so
+        ios-app/KuDroidShell/Resources/runtime/manifest.json
+        ios-app/KuDroidShell/Resources/runtime/FLUTTER_LICENSE.txt
+        ios-app/KuDroidShell/Resources/runtime/DART_LICENSE.txt
+        ios-app/KuDroidShell/Resources/system/etc/fonts.xml
+        ios-app/KuDroidShell/Resources/system/fonts/NotoSans.ttf
+        ios-app/KuDroidShell/Resources/system/NOTO_LICENSE.txt
     )
 
     set_source_files_properties(icon.png ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
         PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    set_source_files_properties(
+        ios-app/KuDroidShell/Resources/runtime/libflutter.so
+        ios-app/KuDroidShell/Resources/runtime/manifest.json
+        ios-app/KuDroidShell/Resources/runtime/FLUTTER_LICENSE.txt
+        ios-app/KuDroidShell/Resources/runtime/DART_LICENSE.txt
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources/runtime HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(ios-app/KuDroidShell/Resources/system/etc/fonts.xml
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources/system/etc HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(ios-app/KuDroidShell/Resources/system/fonts/NotoSans.ttf
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources/system/fonts HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(ios-app/KuDroidShell/Resources/system/NOTO_LICENSE.txt
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources/system HEADER_FILE_ONLY TRUE)
     add_custom_command(TARGET KuDroidShell POST_BUILD
         COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_standalone_launcher.py"
             "$<TARGET_BUNDLE_DIR:KuDroidShell>"
@@ -356,6 +392,39 @@ else()
 
 
     # Host-side regression tests for the guest syscall shims (SyscallShim.cpp).
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_elf_relocations.cpp")
+        add_executable(test_elf_relocations tests/test_elf_relocations.cpp)
+        target_link_libraries(test_elf_relocations PRIVATE kudroid_core)
+        find_program(KUDROID_ELF_TEST_CLANG clang)
+        find_program(KUDROID_ELF_TEST_LLD ld.lld)
+    endif()
+    if(TARGET test_elf_relocations AND KUDROID_ELF_TEST_CLANG AND KUDROID_ELF_TEST_LLD
+       AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/packed_init.c")
+        add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/test_packed_init.so"
+            COMMAND "${KUDROID_ELF_TEST_CLANG}" --target=aarch64-linux-android24 -fPIC -nostdlib -shared -fuse-ld=lld
+                -Wl,--pack-dyn-relocs=android,--hash-style=sysv,-z,max-page-size=16384
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/packed_init.c"
+                -o "${CMAKE_CURRENT_BINARY_DIR}/test_packed_init.so"
+            DEPENDS tests/fixtures/packed_init.c VERBATIM)
+        add_custom_target(kudroid_packed_elf_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/test_packed_init.so")
+        add_dependencies(test_elf_relocations kudroid_packed_elf_fixture)
+        target_compile_definitions(test_elf_relocations PRIVATE
+            KUDROID_PACKED_ELF_FIXTURE="${CMAKE_CURRENT_BINARY_DIR}/test_packed_init.so")
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_elf_packed.cpp")
+        add_executable(test_elf_packed tests/test_elf_packed.cpp src/ElfPackedRelocations.cpp)
+        target_include_directories(test_elf_packed PRIVATE include)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sendfile.cpp")
+        add_executable(test_sendfile tests/test_sendfile.cpp)
+        target_link_libraries(test_sendfile PRIVATE kudroid_core)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_opensl_abi.cpp")
+        add_executable(test_opensl_abi tests/test_opensl_abi.cpp)
+        target_include_directories(test_opensl_abi SYSTEM PRIVATE third_party/android_headers)
+        target_link_libraries(test_opensl_abi PRIVATE kudroid_core)
+    endif()
+
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_shims.cpp")
         add_executable(test_shims
             tests/test_shims.cpp

@@ -118,11 +118,63 @@ public class SystemPackageManager extends PackageManager {
                 }
             }
         }
+        storeMetaData(componentName, bundle);
+    }
+
+    private static void storeMetaData(String componentName, android.os.Bundle bundle) {
         if (componentName == null || componentName.isEmpty()) {
             sApplicationMetaData = bundle;
         } else {
             sComponentMetaData.put(componentName, bundle);
         }
+    }
+
+    private static int resourceId(String reference, android.content.res.Resources resources) {
+        String value = reference.startsWith("@") ? reference.substring(1) : reference;
+        if (value.startsWith("0x")) return (int) Long.parseLong(value.substring(2), 16);
+        if (!value.isEmpty() && Character.isDigit(value.charAt(0))) return (int) Long.parseLong(value);
+        return resources.getIdentifier(value, null, sPackageName);
+    }
+
+    public static synchronized void registerComponentMetaDataTyped(String componentName,
+            String[] keys, String[] values, int[] types) {
+        if (keys == null || values == null || types == null) throw new NullPointerException();
+        if (keys.length != values.length || keys.length != types.length)
+            throw new IllegalArgumentException("Metadata arrays have different lengths");
+        android.os.Bundle bundle = new android.os.Bundle();
+        android.content.res.Resources resources = android.content.res.Resources.getSystem();
+        for (int i = 0; i < keys.length; i++) {
+            String key = keys[i];
+            if (key == null || key.isEmpty()) continue;
+            String value = values[i] == null ? "" : values[i];
+            int type = types[i] & 0xff;
+            if ((types[i] & 0x100) != 0) {
+                bundle.putInt(key, resourceId(value, resources));
+            } else if (type == android.util.TypedValue.TYPE_REFERENCE) {
+                android.util.TypedValue resolved = new android.util.TypedValue();
+                resources.getValue(resourceId(value, resources), resolved, true);
+                if (resolved.type == android.util.TypedValue.TYPE_STRING) {
+                    bundle.putString(key, resolved.string == null ? null : resolved.string.toString());
+                } else if (resolved.type == android.util.TypedValue.TYPE_INT_BOOLEAN) {
+                    bundle.putBoolean(key, resolved.data != 0);
+                } else if (resolved.type >= android.util.TypedValue.TYPE_FIRST_INT
+                        && resolved.type <= android.util.TypedValue.TYPE_LAST_INT) {
+                    bundle.putInt(key, resolved.data);
+                } else if (resolved.type == android.util.TypedValue.TYPE_FLOAT) {
+                    bundle.putFloat(key, resolved.getFloat());
+                }
+            } else if (type == android.util.TypedValue.TYPE_INT_BOOLEAN) {
+                bundle.putBoolean(key, "true".equalsIgnoreCase(value));
+            } else if (type >= android.util.TypedValue.TYPE_FIRST_INT
+                    && type <= android.util.TypedValue.TYPE_LAST_INT) {
+                bundle.putInt(key, (int) Long.parseLong(value));
+            } else if (type == android.util.TypedValue.TYPE_FLOAT) {
+                bundle.putFloat(key, Float.parseFloat(value));
+            } else if (type == android.util.TypedValue.TYPE_STRING || type == 0) {
+                bundle.putString(key, value);
+            }
+        }
+        storeMetaData(componentName, bundle);
     }
 
     private static int sApplicationTheme;
@@ -192,6 +244,49 @@ public class SystemPackageManager extends PackageManager {
     }
 
     @Override
+    public ProviderInfo resolveContentProvider(String authority, int flags) { return null; }
+
+    @Override
+    public String getNameForUid(int uid) {
+        synchronized (SystemPackageManager.class) {
+            return uid == android.os.Process.myUid() && !sPackageName.isEmpty() ? sPackageName : null;
+        }
+    }
+
+    @Override
+    public ActivityInfo getReceiverInfo(ComponentName component, int flags)
+            throws NameNotFoundException {
+        // The package database has no registered manifest receivers.
+        throw new NameNotFoundException(component == null ? "null component" : component.toString());
+    }
+
+    @Override
+    public android.content.res.Resources getResourcesForApplication(ApplicationInfo info)
+            throws NameNotFoundException {
+        if (info == null) throw new NullPointerException("info == null");
+        synchronized (SystemPackageManager.class) {
+            if (!sPackageName.equals(info.packageName) && !"android".equals(info.packageName))
+                throw new NameNotFoundException(info.packageName);
+        }
+        return android.content.res.Resources.getSystem();
+    }
+
+    @Override
+    public List<PackageInfo> getInstalledPackages(int flags) {
+        synchronized (SystemPackageManager.class) {
+            List<PackageInfo> packages = new ArrayList<PackageInfo>();
+            if (!sPackageName.isEmpty()) {
+                try {
+                    packages.add(getPackageInfo(sPackageName, flags));
+                } catch (NameNotFoundException ignored) {
+                    // Only packages with available metadata are listed.
+                }
+            }
+            return packages;
+        }
+    }
+
+    @Override
     public PackageInfo getPackageInfo(String packageName, int flags) throws NameNotFoundException {
         PackageInfo pi = new PackageInfo();
         pi.packageName = packageName;
@@ -212,6 +307,7 @@ public class SystemPackageManager extends PackageManager {
     public ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException {
         ApplicationInfo ai = new ApplicationInfo();
         ai.packageName = packageName;
+        ai.processName = packageName;
         ai.dataDir = "/data/data/" + packageName;
         ai.sourceDir = "/data/app/" + packageName + "/base.apk";
         ai.publicSourceDir = "/data/app/" + packageName + "/base.apk";

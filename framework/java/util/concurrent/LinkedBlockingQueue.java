@@ -10,6 +10,7 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
     }
 
     public LinkedBlockingQueue(int capacity) {
+        if (capacity <= 0) throw new IllegalArgumentException();
         this.capacity = capacity;
     }
 
@@ -38,6 +39,8 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
     }
 
     public synchronized void put(E e) throws InterruptedException {
+        if (e == null) throw new NullPointerException();
+        if (Thread.interrupted()) throw new InterruptedException();
         while (items.size() >= capacity) {
             wait();
         }
@@ -47,13 +50,16 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
 
     public synchronized boolean offer(E e, long timeout, TimeUnit unit)
             throws InterruptedException {
-        long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
+        if (e == null) throw new NullPointerException();
+        long nanos = unit.toNanos(timeout);
+        long start = System.nanoTime();
+        if (Thread.interrupted()) throw new InterruptedException();
         while (items.size() >= capacity) {
-            long remaining = deadline - System.currentTimeMillis();
+            long remaining = nanos <= 0 ? 0 : nanos - (System.nanoTime() - start);
             if (remaining <= 0) {
                 return false;
             }
-            wait(remaining);
+            wait(remaining / 1000000L, (int) (remaining % 1000000L));
         }
         items.add(e);
         notifyAll();
@@ -61,6 +67,7 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
     }
 
     public synchronized E take() throws InterruptedException {
+        if (Thread.interrupted()) throw new InterruptedException();
         while (items.isEmpty()) {
             wait();
         }
@@ -79,13 +86,15 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
     }
 
     public synchronized E poll(long timeout, TimeUnit unit) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
+        long nanos = unit.toNanos(timeout);
+        long start = System.nanoTime();
+        if (Thread.interrupted()) throw new InterruptedException();
         while (items.isEmpty()) {
-            long remaining = deadline - System.currentTimeMillis();
+            long remaining = nanos <= 0 ? 0 : nanos - (System.nanoTime() - start);
             if (remaining <= 0) {
                 return null;
             }
-            wait(remaining);
+            wait(remaining / 1000000L, (int) (remaining % 1000000L));
         }
         E e = items.remove(0);
         notifyAll();
@@ -100,7 +109,7 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
         if (items.isEmpty()) {
             throw new java.util.NoSuchElementException();
         }
-        return items.remove(0);
+        return poll();
     }
 
     public synchronized E element() {
@@ -115,11 +124,14 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
     }
 
     public synchronized int drainTo(java.util.Collection<? super E> c) {
+        if (c == null) throw new NullPointerException();
+        if (c == this) throw new IllegalArgumentException();
         int n = items.size();
         for (int i = 0; i < n; i++) {
             c.add(items.get(i));
         }
         items.clear();
+        notifyAll();
         return n;
     }
 
@@ -136,11 +148,14 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
     }
 
     public synchronized boolean remove(Object o) {
-        return items.remove(o);
+        boolean removed = items.remove(o);
+        if (removed) notifyAll();
+        return removed;
     }
 
     public synchronized void clear() {
         items.clear();
+        notifyAll();
     }
 
     public synchronized boolean containsAll(java.util.Collection<?> c) {
@@ -167,7 +182,18 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
         return items.toArray(a);
     }
 
-    public java.util.Iterator<E> iterator() {
-        return items.iterator();
+    public synchronized java.util.Iterator<E> iterator() {
+        final java.util.Iterator<E> snapshot = new java.util.ArrayList<E>(items).iterator();
+        return new java.util.Iterator<E>() {
+            private E last;
+            private boolean removable;
+            public boolean hasNext() { return snapshot.hasNext(); }
+            public E next() { last = snapshot.next(); removable = true; return last; }
+            public void remove() {
+                if (!removable) throw new IllegalStateException();
+                LinkedBlockingQueue.this.remove(last);
+                removable = false;
+            }
+        };
     }
 }

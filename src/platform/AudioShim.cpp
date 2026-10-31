@@ -43,7 +43,7 @@ typedef int32_t SLresult;
 #define SL_RESULT_SUCCESS 0
 #define SL_RESULT_PARAMETER_INVALID 2
 #define SL_RESULT_RESOURCE_ERROR 4
-#define SL_RESULT_BUFFER_INSUFFICIENT 8
+#define SL_RESULT_BUFFER_INSUFFICIENT 7
 #define SL_RESULT_CONTENT_UNSUPPORTED 9
 
 typedef void* SLObjectItf;
@@ -66,6 +66,11 @@ struct SLDataFormat_PCM {
 struct SLDataSource {
     const void* pLocator;
     const void* pFormat;
+};
+
+struct SLDataFormat_PCM_EX {
+    SLDataFormat_PCM pcm;
+    uint32_t representation;
 };
 
 #define SL_PLAYSTATE_STOPPED 1
@@ -888,6 +893,9 @@ extern "C" SLresult bionic_slEngineCreateAudioPlayer(SLEngineItf self,
             if (fmt->bitsPerSample == 8 || fmt->bitsPerSample == 16 || fmt->bitsPerSample == 32) {
                 player->bitsPerSample = fmt->bitsPerSample;
             }
+            if (fmt->formatType == 4) {
+                player->floatSamples = static_cast<const SLDataFormat_PCM_EX*>(src->pFormat)->representation == 3;
+            }
             if (player->sampleRate < 8000.0 || player->sampleRate > 192000.0) {
                 player->sampleRate = 44100.0;
             }
@@ -968,6 +976,13 @@ extern "C" SLresult bionic_slPlayGetPlayState(SLPlayItf self, uint32_t* pState) 
     if (!player) return SL_RESULT_PARAMETER_INVALID;
     std::lock_guard<std::mutex> lock(player->mtx);
     if (pState) *pState = player->playState;
+    return SL_RESULT_SUCCESS;
+}
+
+extern "C" SLresult bionic_slPlayGetPosition(SLPlayItf self, uint32_t* position) {
+    auto player = find_player(self);
+    if (!player || !position) return SL_RESULT_PARAMETER_INVALID;
+    *position = static_cast<uint32_t>(player->framesPlayed.load(std::memory_order_relaxed) * 1000.0 / player->sampleRate);
     return SL_RESULT_SUCCESS;
 }
 

@@ -19,6 +19,10 @@ public class ContextWrapper extends Context {
     }
     public Context getBaseContext() { return mBase; }
     @Override
+    public java.util.concurrent.Executor getMainExecutor() {
+        return mBase != null ? mBase.getMainExecutor() : super.getMainExecutor();
+    }
+    @Override
     public ComponentName startService(Intent service) { return mBase != null ? mBase.startService(service) : super.startService(service); }
     @Override
     public ComponentName startForegroundService(Intent service) { return mBase != null ? mBase.startForegroundService(service) : super.startForegroundService(service); }
@@ -74,9 +78,16 @@ public class ContextWrapper extends Context {
     public Object getSystemService(Class<?> serviceClass) { return mBase != null ? mBase.getSystemService(serviceClass) : super.getSystemService(serviceClass); }
     public String getSystemServiceName(Class<?> serviceClass) { return mBase != null ? mBase.getSystemServiceName(serviceClass) : super.getSystemServiceName(serviceClass); }
     public int checkSelfPermission(String permission) { return mBase != null ? mBase.checkSelfPermission(permission) : PackageManager.PERMISSION_GRANTED; }
-    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { return mBase != null ? mBase.registerReceiver(receiver, filter) : null; }
-    public void unregisterReceiver(BroadcastReceiver receiver) { if (mBase != null) mBase.unregisterReceiver(receiver); }
-    public void sendBroadcast(Intent intent) { if (mBase != null) mBase.sendBroadcast(intent); }
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { return mBase != null ? mBase.registerReceiver(receiver, filter) : super.registerReceiver(receiver, filter); }
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter, String broadcastPermission, android.os.Handler scheduler) {
+        return mBase != null ? mBase.registerReceiver(receiver, filter, broadcastPermission, scheduler)
+                : super.registerReceiver(receiver, filter, broadcastPermission, scheduler);
+    }
+    public void unregisterReceiver(BroadcastReceiver receiver) { if (mBase != null) mBase.unregisterReceiver(receiver); else super.unregisterReceiver(receiver); }
+    public void sendBroadcast(Intent intent) { if (mBase != null) mBase.sendBroadcast(intent); else super.sendBroadcast(intent); }
+    public void sendBroadcast(Intent intent, String receiverPermission) {
+        if (mBase != null) mBase.sendBroadcast(intent, receiverPermission); else super.sendBroadcast(intent, receiverPermission);
+    }
     public void startActivity(Intent intent) { if (mBase != null) mBase.startActivity(intent); }
     public void startActivity(Intent intent, Bundle options) { if (mBase != null) mBase.startActivity(intent, options); }
     public Context getApplicationContext() { return mBase != null ? mBase.getApplicationContext() : this; }

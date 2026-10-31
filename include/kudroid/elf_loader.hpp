@@ -112,7 +112,7 @@ private:
     // Apply final W^X safe segment protections after relocations have completed.
     bool applyProtections();
 
-    // Writable host address for guest image offset `vaddr` (ELF vaddr). Under
+    // Writable host address for an offset from the first PT_LOAD. Under
     // split-image mapping the exec prefix is written through the backing view,
     // the data suffix through the guest-visible mapping itself.
     char* writePtrAt(std::uint64_t vaddr);
@@ -204,7 +204,7 @@ public:
     // Load an ELF plus all its DT_NEEDED dependencies.
     bool loadRecursive(const std::string& path);
     // Resolve a symbol from any loaded ELF, falling back to the bionic shim.
-    void* resolveGlobalSymbol(const char* name) const;
+    void* resolveGlobalSymbol(const char* name, bool allowDummy = true) const;
     // Resolve a symbol from the main app library.
     void* resolveAppSymbol(const char* name);
     // Return matches from every loaded ELF (sorted by name).
@@ -231,6 +231,8 @@ private:
 
     mutable std::recursive_mutex mtx_;
     std::unordered_map<std::string, std::unique_ptr<ElfLoader>> libraries_;
+    // Aliases refer to one owning entry and are never enumerated as libraries.
+    std::unordered_map<std::string, std::string> runtimeAliases_;
     std::string lastError_;
 
     mutable std::vector<std::string> sortedKeys_;

@@ -206,4 +206,12 @@ public final class Integer extends Number implements Comparable<Integer> {
         int d = distance & 31;
         return (i >>> d) | (i << (32 - d));
     }
+    public static int reverseBytes(int value) {
+        int result = 0;
+        for (int i = 0; i < 4; i++) {
+            result = (int) ((result << 8) | (value & 255));
+            value = (int) (value >>> 8);
+        }
+        return result;
+    }
 }
