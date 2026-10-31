@@ -39,6 +39,7 @@ public class ArrayBlockingQueue<E> extends AbstractQueue<E> implements BlockingQ
 
     public synchronized void put(E e) throws InterruptedException {
         if (e == null) throw new NullPointerException();
+        if (Thread.interrupted()) throw new InterruptedException();
         while (count == items.length) {
             wait();
         }
@@ -50,6 +51,14 @@ public class ArrayBlockingQueue<E> extends AbstractQueue<E> implements BlockingQ
 
     public synchronized boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
         if (e == null) throw new NullPointerException();
+        long nanos = unit.toNanos(timeout);
+        long start = System.nanoTime();
+        if (Thread.interrupted()) throw new InterruptedException();
+        while (count == items.length) {
+            long remaining = nanos <= 0 ? 0 : nanos - (System.nanoTime() - start);
+            if (remaining <= 0) return false;
+            wait(remaining / 1000000L, (int) (remaining % 1000000L));
+        }
         return offer(e);
     }
 
@@ -65,6 +74,7 @@ public class ArrayBlockingQueue<E> extends AbstractQueue<E> implements BlockingQ
     }
 
     public synchronized E take() throws InterruptedException {
+        if (Thread.interrupted()) throw new InterruptedException();
         while (count == 0) {
             wait();
         }
@@ -72,7 +82,40 @@ public class ArrayBlockingQueue<E> extends AbstractQueue<E> implements BlockingQ
     }
 
     public synchronized E poll(long timeout, TimeUnit unit) throws InterruptedException {
+        long nanos = unit.toNanos(timeout);
+        long start = System.nanoTime();
+        if (Thread.interrupted()) throw new InterruptedException();
+        while (count == 0) {
+            long remaining = nanos <= 0 ? 0 : nanos - (System.nanoTime() - start);
+            if (remaining <= 0) return null;
+            wait(remaining / 1000000L, (int) (remaining % 1000000L));
+        }
         return poll();
+    }
+
+    public synchronized boolean remove(Object value) {
+        if (value == null) return false;
+        int index = takeIndex;
+        for (int n = 0; n < count; n++) {
+            if (value.equals(items[index])) {
+                if (index == takeIndex) { poll(); return true; }
+                while (true) {
+                    int next = (index + 1) % items.length;
+                    if (next == putIndex) {
+                        items[index] = null;
+                        putIndex = index;
+                        break;
+                    }
+                    items[index] = items[next];
+                    index = next;
+                }
+                count--;
+                notifyAll();
+                return true;
+            }
+            index = (index + 1) % items.length;
+        }
+        return false;
     }
 
     @SuppressWarnings("unchecked")
@@ -104,7 +147,8 @@ public class ArrayBlockingQueue<E> extends AbstractQueue<E> implements BlockingQ
     }
 
     public synchronized Iterator<E> iterator() {
-        final Object[] snapshot = toArray();
+        final Object[] snapshot = new Object[count];
+        for (int i = 0; i < count; i++) snapshot[i] = items[(takeIndex + i) % items.length];
         return new Iterator<E>() {
             private int cursor = 0;
             public boolean hasNext() { return cursor < snapshot.length; }

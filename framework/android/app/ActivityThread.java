@@ -38,6 +38,30 @@ public final class ActivityThread {
     private java.util.ArrayList<String> mFrameworkGaps = new java.util.ArrayList<String>();
     private H mH;
     private final java.util.ArrayList<Activity> mBackStack = new java.util.ArrayList<Activity>();
+    private final java.util.IdentityHashMap<Activity, ResultTarget> mResultTargets =
+            new java.util.IdentityHashMap<Activity, ResultTarget>();
+    private final java.util.IdentityHashMap<Activity, java.util.ArrayList<ActivityResult>> mPendingResults =
+            new java.util.IdentityHashMap<Activity, java.util.ArrayList<ActivityResult>>();
+
+    private static final class ResultTarget {
+        final Activity caller;
+        final int requestCode;
+        ResultTarget(Activity caller, int requestCode) {
+            this.caller = caller;
+            this.requestCode = requestCode;
+        }
+    }
+
+    private static final class ActivityResult {
+        final int requestCode;
+        final int resultCode;
+        final Intent data;
+        ActivityResult(int requestCode, int resultCode, Intent data) {
+            this.requestCode = requestCode;
+            this.resultCode = resultCode;
+            this.data = data;
+        }
+    }
 
     private static native void kudroid_note_java_paused();
 
@@ -382,18 +406,26 @@ public final class ActivityThread {
         }
     }
 
-    static void finishActivity(final Activity activity) {
+    static void finishActivity(final Activity activity, final int resultCode, final Intent data) {
         final ActivityThread thread = sCurrentActivityThread;
         if (thread == null || thread.mH == null) return;
         thread.mH.post(new Runnable() {
-            public void run() { thread.handleFinishActivity(activity); }
+            public void run() { thread.handleFinishActivity(activity, resultCode, data); }
         });
     }
 
-    private void handleFinishActivity(Activity activity) {
-        if (activity == null || activity.isDestroyed()) return;
+    private void handleFinishActivity(Activity activity, int resultCode, Intent data) {
+        if (activity == null) return;
+        ResultTarget resultTarget = mResultTargets.remove(activity);
+        queueActivityResult(resultTarget, resultCode, data);
+        mPendingResults.remove(activity);
+        if (activity.isDestroyed()) {
+            deliverResumedActivityResults();
+            return;
+        }
         if (activity != mInitialActivity) {
             if (mBackStack.remove(activity)) activity.performDestroy();
+            deliverResumedActivityResults();
             return;
         }
         if (mBackStack.isEmpty()) { handleDestroyActivity(); return; }
@@ -407,6 +439,33 @@ public final class ActivityThread {
         mInitialActivityName = previous.getClass().getName();
         previous.performRestart();
         handleResumeActivity();
+    }
+
+    private void queueActivityResult(ResultTarget target, int resultCode, Intent data) {
+        if (target == null || target.caller.isFinishing() || target.caller.isDestroyed()) return;
+        java.util.ArrayList<ActivityResult> results = mPendingResults.get(target.caller);
+        if (results == null) {
+            results = new java.util.ArrayList<ActivityResult>();
+            mPendingResults.put(target.caller, results);
+        }
+        results.add(new ActivityResult(target.requestCode, resultCode, data));
+    }
+
+    private void deliverActivityResults(Activity activity) {
+        java.util.ArrayList<ActivityResult> results = mPendingResults.remove(activity);
+        if (results == null || activity.isFinishing() || activity.isDestroyed()) return;
+        for (ActivityResult result : results) {
+            if (activity.isFinishing() || activity.isDestroyed()) break;
+            activity.dispatchActivityResult(result.requestCode, result.resultCode, result.data);
+        }
+    }
+
+    private void deliverResumedActivityResults() {
+        Activity activity = mInitialActivity;
+        if (activity == null || !activity.isResumed() || !mPendingResults.containsKey(activity)) return;
+        activity.performPause();
+        deliverActivityResults(activity);
+        if (!activity.isFinishing()) activity.performResume();
     }
 
     public static void postTouchEvent(int action, int pointerCount, float x, float y, long eventTime) {
@@ -1075,6 +1134,8 @@ public final class ActivityThread {
         try {
             if (mInitialActivity != null) {
                 if (!mInitialActivity.isStarted()) mInitialActivity.performStart();
+                deliverActivityResults(mInitialActivity);
+                if (mInitialActivity.isFinishing()) return;
                 if (!mInitialActivity.isResumed()) mInitialActivity.performResume();
                 mInitialActivity.renderViewHierarchy();
                 dispatchSurfaceCallbacks(mInitialActivity);
@@ -1136,6 +1197,10 @@ public final class ActivityThread {
     }
 
     void handleStartActivity(final Activity from, final Intent intent) {
+        handleStartActivity(from, intent, -1);
+    }
+
+    void handleStartActivity(final Activity from, final Intent intent, final int requestCode) {
         if (intent == null) return;
         if (openExternal(intent)) return;
         String target = null;
@@ -1170,6 +1235,13 @@ public final class ActivityThread {
                             : (Activity) nextClass.newInstance();
                     attachActivity(next, resolvedTarget);
                     next.setIntent(intent);
+                    if (requestCode >= 0 && from != null) {
+                        if ((intent.getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) {
+                            queueActivityResult(new ResultTarget(from, requestCode), Activity.RESULT_CANCELED, null);
+                        } else {
+                            mResultTargets.put(next, new ResultTarget(from, requestCode));
+                        }
+                    }
                     if (previous != null) {
                         previousStopped = true;
                         if (previous.hasWindowFocus()) previous.performWindowFocusChanged(false);
@@ -1180,15 +1252,21 @@ public final class ActivityThread {
                     mInitialActivity = next;
                     mInitialActivityName = resolvedTarget;
                     next.performCreate(null);
-                    next.performStart();
-                    next.performResume();
-                    next.renderViewHierarchy();
-                    dispatchSurfaceCallbacks(next);
-                    next.performWindowFocusChanged(true);
+                    if (!next.isFinishing()) next.performStart();
+                    if (!next.isFinishing()) next.performResume();
+                    if (!next.isFinishing()) {
+                        next.renderViewHierarchy();
+                        dispatchSurfaceCallbacks(next);
+                        next.performWindowFocusChanged(true);
+                    }
                     if (previous != null) {
                         if (previous.isFinishing()
                                 || (previous.getIntent().getFlags() & Intent.FLAG_ACTIVITY_NO_HISTORY) != 0) {
                             previous.performDestroy();
+                            if (!previous.isFinishing()) {
+                                queueActivityResult(mResultTargets.remove(previous), Activity.RESULT_CANCELED, null);
+                            }
+                            mPendingResults.remove(previous);
                         } else {
                             mBackStack.add(previous);
                         }
@@ -1199,6 +1277,8 @@ public final class ActivityThread {
                     final String gap = frameworkGapOf(t);
                     if (gap != null && !mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
                     if (next != null) {
+                        queueActivityResult(mResultTargets.remove(next), Activity.RESULT_CANCELED, null);
+                        mPendingResults.remove(next);
                         try {
                             if (next.hasWindowFocus()) next.performWindowFocusChanged(false);
                             if (next.isResumed()) next.performPause();
@@ -1258,6 +1338,8 @@ public final class ActivityThread {
                 previous.performDestroy();
             }
             mBackStack.clear();
+            mResultTargets.clear();
+            mPendingResults.clear();
         } catch (Throwable t) {
             t.printStackTrace();
         }

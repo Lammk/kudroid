@@ -4,6 +4,7 @@
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
+#include "kudroid/platform/OpenSlShim.h"
 #include "kudroid/platform/MediaShim.h"
 #include "kudroid/platform/AssetShim.h"
 
@@ -87,12 +88,13 @@ void print_bound_symbols() {
     }
 }
 
-void* resolve_bionic_symbol(const char* name) {
+void* resolve_bionic_symbol(const char* name, bool allowDummy) {
+    if (!name || !*name) return nullptr;
     {
         std::shared_lock<std::shared_mutex> lock(resolveMutex);
         auto it = boundSymbols.find(name);
         if (it != boundSymbols.end()) {
-            return it->second.first;
+            return !allowDummy && is_universal_dummy(it->second.first) ? nullptr : it->second.first;
         }
     }
 
@@ -103,7 +105,7 @@ void* resolve_bionic_symbol(const char* name) {
         std::unique_lock<std::shared_mutex> lock(resolveMutex);
         auto it = boundSymbols.find(name);
         if (it != boundSymbols.end()) {
-            return it->second.first;
+            return !allowDummy && is_universal_dummy(it->second.first) ? nullptr : it->second.first;
         }
 
         size_t count = 0;
@@ -118,6 +120,11 @@ void* resolve_bionic_symbol(const char* name) {
         if (!resolved) {
             const SymbolEntry* input = get_input_symbols(&count);
             resolved = resolve_from_list(input, count, name);
+        }
+
+        if (!resolved) {
+            const SymbolEntry* opensl = get_opensl_symbols(&count);
+            resolved = resolve_from_list(opensl, count, name);
         }
 
         if (!resolved) {
@@ -233,7 +240,7 @@ void* resolve_bionic_symbol(const char* name) {
         // help if the guest read FILE fields directly, and would break the common
         // case of passing the pointer straight to host stdio.
 
-        if (!resolved) {
+        if (!resolved && allowDummy) {
             char msg[256];
             snprintf(msg, sizeof(msg), "missing symbol bound to dummy: %s", name);
             trace_shim(msg);
@@ -250,7 +257,7 @@ void* resolve_bionic_symbol(const char* name) {
             resolved = reinterpret_cast<void*>(&kudroid_universal_dummy);
         }
 
-        boundSymbols[name] = {resolved, is_host};
+        if (resolved) boundSymbols[name] = {resolved, is_host};
     }
     return resolved;
 }

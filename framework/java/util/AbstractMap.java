@@ -109,4 +109,37 @@ public abstract class AbstractMap<K,V> implements Map<K,V> {
         };
     }
     public abstract Set<Entry<K,V>> entrySet();
+
+    public static class SimpleImmutableEntry<K,V> implements Entry<K,V>, java.io.Serializable {
+        private static final long serialVersionUID = 7138329143949025153L;
+        private final K key;
+        private final V value;
+
+        public SimpleImmutableEntry(K key, V value) {
+            this.key = key;
+            this.value = value;
+        }
+
+        public SimpleImmutableEntry(Entry<? extends K, ? extends V> entry) {
+            this.key = entry.getKey();
+            this.value = entry.getValue();
+        }
+
+        public K getKey() { return key; }
+        public V getValue() { return value; }
+        public V setValue(V value) { throw new UnsupportedOperationException(); }
+
+        public boolean equals(Object object) {
+            if (!(object instanceof Entry)) return false;
+            Entry<?,?> entry = (Entry<?,?>) object;
+            return (key == null ? entry.getKey() == null : key.equals(entry.getKey()))
+                    && (value == null ? entry.getValue() == null : value.equals(entry.getValue()));
+        }
+
+        public int hashCode() {
+            return (key == null ? 0 : key.hashCode()) ^ (value == null ? 0 : value.hashCode());
+        }
+
+        public String toString() { return key + "=" + value; }
+    }
 }

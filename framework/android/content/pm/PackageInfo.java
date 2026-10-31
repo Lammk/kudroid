@@ -5,6 +5,7 @@ import android.os.Parcelable;
 
 public class PackageInfo implements Parcelable {
     public String packageName;
+    public String[] splitNames;
     public int versionCode;
     public long versionCodeMajor;
     public String versionName;
@@ -13,6 +14,7 @@ public class PackageInfo implements Parcelable {
     public long lastUpdateTime;
     public int[] gids;
     public ActivityInfo[] activities;
+    public ProviderInfo[] providers;
     public String[] requestedPermissions;
     public int[] requestedPermissionsFlags;
     public Signature[] signatures;

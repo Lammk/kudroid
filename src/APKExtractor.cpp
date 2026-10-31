@@ -565,6 +565,9 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     // the manifest uses android:resource instead, so accumulate then commit.
     std::string metaName;
     std::string metaValue;
+    std::string metaResource;
+    uint8_t metaValueType = 0;
+    uint8_t metaResourceType = 0;
     bool sawMetaValue = false;
 
     // Record every activity, not just the launcher. Callers can then try real
@@ -662,6 +665,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                 } else if (tagName == "meta-data") {
                     metaName.clear();
                     metaValue.clear();
+                    metaResource.clear();
+                    metaValueType = metaResourceType = 0;
                     sawMetaValue = false;
                 }
 
@@ -686,7 +691,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         const std::uint32_t dataVal = read32(data, attrCur + 16);
                         if (attrType == 0x03 /* TYPE_STRING */ && dataVal < stringPool.size()) {
                             attrVal = stringPool[dataVal];
-                        } else if (attrType >= 0x10 && attrType <= 0x11 /* TYPE_INT_DEC / HEX */) {
+                        } else if (attrType >= 0x10 && attrType <= 0x1f && attrType != 0x12) {
                             attrVal = std::to_string(dataVal);
                         } else if (attrType == 0x12 /* TYPE_INT_BOOLEAN */) {
                             // aapt writes 0xFFFFFFFF for true and 0 for false.
@@ -727,13 +732,11 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                             metaName = attrVal;
                         } else if (attrName == "value") {
                             metaValue = attrVal;
+                            metaValueType = attrType;
                             sawMetaValue = true;
-                        } else if (attrName == "resource" && !sawMetaValue) {
-                            // android:resource is an id, not text. Keep it so the key is
-                            // known to exist — an app testing containsKey() gets the
-                            // right answer even though the value cannot be resolved.
-                            metaValue = attrVal;
-                            sawMetaValue = true;
+                        } else if (attrName == "resource") {
+                            metaResource = attrVal;
+                            metaResourceType = attrType;
                         }
                     } else if (isActivityTag) {
                         if (attrName == "name" && currentActivity.empty() && !attrVal.empty()) {
@@ -803,10 +806,13 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     // over <application> because Android scopes it that way: two
                     // activities can carry different values for the same key, and
                     // reading the wrong one is worse than reading none.
-                    if (!metaName.empty()) {
+                    if (!metaName.empty() && (sawMetaValue || !metaResource.empty())) {
                         MetaDataEntry entry;
                         entry.name = metaName;
-                        entry.value = metaValue;
+                        entry.isResource = metaResourceType == 0x01 && !metaResource.empty()
+                                           && metaResource != "@0x00000000";
+                        entry.value = entry.isResource ? metaResource : metaValue;
+                        entry.valueType = entry.isResource ? metaResourceType : metaValueType;
                         if (activityDepth >= 0) {
                             bool dup = false;
                             for (const MetaDataEntry& m : currentActivityMeta) {

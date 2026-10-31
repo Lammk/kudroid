@@ -2,6 +2,7 @@
 #include "kudroid/platform/PixelColorFilter.h"
 #include <fstream>
 #include "kudroid/kuart/LibCore.h"
+#include "kudroid/platform/FileObserverHost.h"
 
 #include <algorithm>
 #include <atomic>
@@ -239,6 +240,10 @@ void InitStringFrom(DexClassLinker* linker, DexObject* self, const std::string& 
 }
 
 // java.lang.Object
+DexObject* CurrentThreadObject(Interpreter* interp);
+bool ThreadIsInterrupted(DexObject* thread);
+bool ClearThreadInterrupted(DexObject* thread);
+
 bool Invoke_java_lang_Object(Interpreter* interp, const char* name, const DexValue* args,
                              size_t num_args, DexValue* result) {
     DexObject* self = args[0].l;
@@ -297,9 +302,23 @@ bool Invoke_java_lang_Object(Interpreter* interp, const char* name, const DexVal
     if (std::strcmp(name, "wait") == 0) {
         const int64_t millis = num_args > 1 ? args[1].j : 0;
         const int32_t nanos = num_args > 2 ? args[2].i : 0;
-        if (!Monitor::Wait(self, millis, nanos)) {
-            interp->ThrowException("Ljava/lang/IllegalMonitorStateException;",
-                                   "wait without owning the monitor");
+        if (millis < 0 || nanos < 0 || nanos > 999999) {
+            interp->ThrowException("Ljava/lang/IllegalArgumentException;", "invalid wait timeout");
+            return true;
+        }
+        if (!Monitor::IsOwned(self)) {
+            interp->ThrowException("Ljava/lang/IllegalMonitorStateException;", "wait without owning the monitor");
+            return true;
+        }
+        DexObject* thread = CurrentThreadObject(interp);
+        if (ClearThreadInterrupted(thread)) {
+            interp->ThrowException("Ljava/lang/InterruptedException;", "wait interrupted");
+            return true;
+        }
+        if (!Monitor::Wait(self, millis, nanos, thread)) {
+            interp->ThrowException("Ljava/lang/IllegalMonitorStateException;", "wait without owning the monitor");
+        } else if (ClearThreadInterrupted(thread)) {
+            interp->ThrowException("Ljava/lang/InterruptedException;", "wait interrupted");
         }
         return true;
     }
@@ -2356,18 +2375,18 @@ thread_local DexObject* t_current_thread = nullptr;
 
 // The main thread has no java.lang.Thread object until something asks for one.
 DexObject* MainThreadObject(Interpreter* interp) {
-    static DexObject* main_thread = nullptr;
-    if (main_thread == nullptr) {
-        DexClass* klass = interp->linker()->FindClass("Ljava/lang/Thread;");
-        if (klass == nullptr) return nullptr;
-        interp->EnsureInitialized(klass);
-        main_thread = interp->linker()->AllocObject(klass);
-        if (main_thread != nullptr) {
-            SetRefField(main_thread, "name", "Ljava/lang/String;",
-                        interp->linker()->NewString("main"));
+    DexClass* klass = interp->linker()->FindClass("Ljava/lang/Thread;");
+    if (klass == nullptr || !interp->EnsureInitialized(klass)) return nullptr;
+    DexField* field = klass->FindStaticField("mainThread", "Ljava/lang/Thread;");
+    if (field == nullptr) return nullptr;
+    DexValue& slot = klass->static_values[field->offset_or_slot];
+    if (slot.l == nullptr) {
+        slot.l = interp->linker()->AllocObject(klass);
+        if (slot.l != nullptr) {
+            SetRefField(slot.l, "name", "Ljava/lang/String;", interp->linker()->NewString("main"));
         }
     }
-    return main_thread;
+    return slot.l;
 }
 
 DexObject* CurrentThreadObject(Interpreter* interp) {
@@ -2389,8 +2408,16 @@ DexObject* ThreadParkLock(Interpreter* interp, DexObject* thread) {
 }
 
 bool ThreadIsInterrupted(DexObject* thread) {
+    if (thread == nullptr || thread->clazz == nullptr) return false;
     DexField* field = thread->clazz->FindInstanceField("interrupted", "Z");
     return field != nullptr && thread->GetField<uint8_t>(field->offset_or_slot) != 0;
+}
+
+bool ClearThreadInterrupted(DexObject* thread) {
+    if (!ThreadIsInterrupted(thread)) return false;
+    DexField* field = thread->clazz->FindInstanceField("interrupted", "Z");
+    thread->SetField<uint8_t>(field->offset_or_slot, 0);
+    return true;
 }
 
 void UnparkThread(Interpreter* interp, DexObject* thread) {
@@ -2493,11 +2520,38 @@ bool Invoke_java_lang_Thread(Interpreter* interp, const char* name, const DexVal
     if (std::strcmp(name, "sleep") == 0) {
         const int64_t ms = args[0].j;
         const int32_t nanos = num_args > 1 ? args[1].i : 0;
+        if (ms < 0 || nanos < 0 || nanos > 999999) {
+            interp->ThrowException("Ljava/lang/IllegalArgumentException;", "invalid sleep timeout");
+            return true;
+        }
+        DexObject* thread = CurrentThreadObject(interp);
+        if (ClearThreadInterrupted(thread)) {
+            interp->ThrowException("Ljava/lang/InterruptedException;", "sleep interrupted");
+            return true;
+        }
         if (ms > 0 || nanos > 0) {
-            // Sleeping keeps the VM lock released so other Java threads can run.
-            VmLockRelease unlocked;
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms) +
-                                        std::chrono::nanoseconds(nanos));
+            DexObject* lock = ThreadParkLock(interp, thread);
+            if (lock == nullptr) return true;
+            Monitor::Enter(lock);
+            const auto start = std::chrono::steady_clock::now();
+            int64_t remaining_ms = ms;
+            int32_t remaining_ns = nanos;
+            do {
+                Monitor::Wait(lock, remaining_ms, remaining_ns, thread);
+                if (ThreadIsInterrupted(thread)) break;
+                const int64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                const int64_t elapsed_ms = elapsed / 1000000;
+                const int32_t elapsed_ns = static_cast<int32_t>(elapsed % 1000000);
+                if (elapsed_ms > ms || (elapsed_ms == ms && elapsed_ns >= nanos)) break;
+                remaining_ms = ms - elapsed_ms;
+                remaining_ns = nanos - elapsed_ns;
+                if (remaining_ns < 0) { --remaining_ms; remaining_ns += 1000000; }
+            } while (true);
+            Monitor::Exit(lock);
+            if (ClearThreadInterrupted(thread)) {
+                interp->ThrowException("Ljava/lang/InterruptedException;", "sleep interrupted");
+            }
         }
         return true;
     }
@@ -2507,6 +2561,7 @@ bool Invoke_java_lang_Thread(Interpreter* interp, const char* name, const DexVal
         return true;
     }
     if (std::strcmp(name, "nativeInterrupt") == 0) {
+        Monitor::Interrupt(args[0].l);
         DexObject* lock = GetRefField(args[0].l, "parkLock", "Ljava/lang/Object;");
         if (lock != nullptr) {
             Monitor::Enter(lock);
@@ -3851,6 +3906,53 @@ bool Invoke_android_graphics_Bitmap(Interpreter* interp, const char* name, const
         }
         return true;
     }
+    if (std::strcmp(name, "nativeReadPixels") == 0) {
+        if (num_args < 4) return false;
+        auto* dst = reinterpret_cast<DexArray*>(args[0].l);
+        auto* src = reinterpret_cast<DexArray*>(args[2].l);
+        const int config = args[1].i;
+        const int32_t offset = args[3].i;
+        if (src == nullptr || dst == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "bitmap copy");
+            return true;
+        }
+        const size_t bpp = config == 0 ? 4 : config == 1 ? 1 : 2;
+        if (config < 0 || config > 3 || offset < 0 || offset > src->length ||
+            static_cast<size_t>(dst->length) * bpp > static_cast<size_t>(src->length - offset)) {
+            interp->ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;", "bitmap copy range");
+            return true;
+        }
+        const uint8_t* in = src->Data() + offset;
+        auto* out = reinterpret_cast<uint32_t*>(dst->Data());
+        for (int32_t i = 0; i < dst->length; ++i, in += bpp) {
+            uint32_t a, r, g, b;
+            if (config == 1) {
+                out[i] = static_cast<uint32_t>(in[0]) << 24;
+                continue;
+            }
+            if (config == 2) {
+                const uint32_t v = in[0] | (static_cast<uint32_t>(in[1]) << 8);
+                r = (v >> 11) & 31; g = (v >> 5) & 63; b = v & 31;
+                out[i] = 0xff000000u | ((r << 3 | r >> 2) << 16) |
+                         ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+                continue;
+            }
+            if (config == 3) {
+                const uint32_t v = in[0] | (static_cast<uint32_t>(in[1]) << 8);
+                a = (v >> 12) * 17; r = ((v >> 8) & 15) * 17;
+                g = ((v >> 4) & 15) * 17; b = (v & 15) * 17;
+            } else {
+                r = in[0]; g = in[1]; b = in[2]; a = in[3];
+            }
+            // The renderer stores straight ARGB; imported bytes are premultiplied.
+            auto unpremultiply = [a](uint32_t c) {
+                return a == 0 ? 0u : std::min(255u, (c * 255 + a / 2) / a);
+            };
+            out[i] = (a << 24) | (unpremultiply(r) << 16) |
+                     (unpremultiply(g) << 8) | unpremultiply(b);
+        }
+        return true;
+    }
     if (std::strcmp(name, "nativeCopyPixels") == 0) {
         // (int[] src, int config, byte[] dst, int dstOffset); config 0 ARGB_8888,
         // 1 ALPHA_8, 2 RGB_565, 3 ARGB_4444.
@@ -3874,9 +3976,9 @@ bool Invoke_android_graphics_Bitmap(Interpreter* interp, const char* name, const
         for (int32_t i = 0; i < src->length; ++i) {
             const uint32_t p = in[i];
             const uint32_t a = p >> 24;
-            const uint32_t r = ((p >> 16) & 255) * a / 255;
-            const uint32_t g = ((p >> 8) & 255) * a / 255;
-            const uint32_t b = (p & 255) * a / 255;
+            const uint32_t r = (((p >> 16) & 255) * a + 127) / 255;
+            const uint32_t g = (((p >> 8) & 255) * a + 127) / 255;
+            const uint32_t b = ((p & 255) * a + 127) / 255;
             switch (config) {
                 case 0:
                     out[0] = static_cast<uint8_t>(r);
@@ -3961,6 +4063,7 @@ namespace {
 struct JavaFrameCallback {
     Interpreter* interp;
     DexObject* callback;
+    DexObject* choreographer;
 };
 
 // Every JavaFrameCallback handed to the pacer, so removeFrameCallback can find the
@@ -3978,7 +4081,7 @@ void FrameCallbackReleaseGlobalRef(Interpreter* interp, DexObject* callback) {
     {
         std::lock_guard<std::mutex> lock(g_java_frame_mutex);
         for (JavaFrameCallback* c : g_java_frame_contexts) {
-            if (c->callback == callback) {
+            if (c->callback == callback || c->choreographer == callback) {
                 still_queued = true;
                 break;
             }
@@ -4013,6 +4116,7 @@ void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
     }
 
     if (interp != nullptr && callback != nullptr && interp->linker() != nullptr) {
+        SetLongField(ctx->choreographer, "mLastFrameTimeNanos", frame_time_ns);
         DexClass* klass = interp->linker()->ClassOfObject(callback);
         if (klass != nullptr) {
             // Virtual dispatch on the callback's real class. The interface method is
@@ -4036,6 +4140,7 @@ void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
         }
     }
     FrameCallbackReleaseGlobalRef(interp, callback);
+    FrameCallbackReleaseGlobalRef(interp, ctx->choreographer);
     delete ctx;
 }
 
@@ -4056,8 +4161,9 @@ bool Invoke_android_view_Choreographer(Interpreter* interp, const char* name,
         // Global ref keeps the callback reachable while queued.
         if (interp->jni_env() != nullptr) {
             interp->jni_env()->AddGlobalRef(callback);
+            interp->jni_env()->AddGlobalRef(args[0].l);
         }
-        auto* ctx = new JavaFrameCallback{interp, callback};
+        auto* ctx = new JavaFrameCallback{interp, callback, args[0].l};
         {
             std::lock_guard<std::mutex> lock(g_java_frame_mutex);
             g_java_frame_contexts.push_back(ctx);
@@ -4092,6 +4198,7 @@ bool Invoke_android_view_Choreographer(Interpreter* interp, const char* name,
             // trampoline, and deleting it here as well would be a double free.
             if (kudroid::frame_pacer_remove(
                     reinterpret_cast<void*>(&JavaFrameCallbackTrampoline), ctx) > 0) {
+                FrameCallbackReleaseGlobalRef(interp, ctx->choreographer);
                 delete ctx;
             }
         }
@@ -4758,6 +4865,8 @@ extern "C" const char* kudroid_get_assets_dir(void);
 // backing file plus its in-file offset and length. Defined in AssetShim.cpp.
 extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
                                            int64_t* outStart, int64_t* outLength);
+extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
+                                               int64_t* outOffset, int64_t* outLength);
 
 bool Invoke_android_provider_Settings(Interpreter* interp, const char* name,
                                       const DexValue* /*args*/, size_t /*num_args*/,
@@ -4783,10 +4892,9 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
                         : nullptr;
         return true;
     }
-    // nativeResolveAsset(String): [String path, Long start, Long length] or null — the
-    // AAssetManager shim's answer for an asset that is only inside base.apk, so the
-    // Java side can hand a caller a real file (AssetFileDescriptor / FMOD).
-    if (std::strcmp(name, "nativeResolveAsset") == 0) {
+    // Return the backing path, offset and length for an asset or package entry.
+    if (std::strcmp(name, "nativeResolveAsset") == 0 ||
+        std::strcmp(name, "nativeResolvePackageResource") == 0) {
         if (interp == nullptr || interp->linker() == nullptr || num_args < 1 ||
             args[0].l == nullptr) {
             result->l = nullptr;
@@ -4796,9 +4904,11 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
         const char* filename = str->utf8 ? str->utf8 : "";
         char* path = nullptr;
         int64_t start = 0, length = 0;
-        const int rc = kudroid_asset_resolve_bytes(filename, &path, &start, &length);
+        const int rc = std::strcmp(name, "nativeResolvePackageResource") == 0
+                ? kudroid_package_resolve_bytes(filename, &path, &start, &length)
+                : kudroid_asset_resolve_bytes(filename, &path, &start, &length);
         if (rc <= 0 || path == nullptr) {
-            result->l = nullptr;  // the Java caller throws FileNotFoundException
+            result->l = nullptr;
             return true;
         }
         DexClassLinker* linker = interp->linker();
@@ -4819,9 +4929,6 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
     }
     return false;
 }
-
-extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
-                                               int64_t* outOffset, int64_t* outLength);
 
 bool Invoke_VectorDrawable(Interpreter* interp, const char* name, const DexValue* args,
                            size_t num_args, DexValue* result) {
@@ -5060,6 +5167,7 @@ size_t LibCoreDiscardFrameCallbacks(Interpreter* interp) {
         g_java_frame_contexts.erase(g_java_frame_contexts.begin() + static_cast<long>(i));
         if (interp->jni_env() != nullptr) {
             interp->jni_env()->DeleteGlobalRef(reinterpret_cast<jobject>(ctx->callback));
+            interp->jni_env()->DeleteGlobalRef(reinterpret_cast<jobject>(ctx->choreographer));
         }
         delete ctx;
         ++removed;
@@ -5124,6 +5232,35 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/invoke/MethodHandles$Lookup;") == 0) {
         return Invoke_java_lang_invoke_Lookup(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/os/FileObserver;") == 0) {
+        if (std::strcmp(name, "nativeStart") == 0) {
+            const uint32_t mask = static_cast<uint32_t>(args[1].i);
+            const std::string path = VFSPathRemapper::getInstance().remap(GetStringUtf8(args[0]));
+            if ((mask & 0xfff & ~supported_file_watch_events()) != 0)
+                std::fprintf(stderr, "[KuART][FileObserver] unsupported kernel event mask=0x%x\n",
+                             mask & 0xfff & ~supported_file_watch_events());
+            *result = DexValue::Long(static_cast<int64_t>(start_file_watch(path, mask)));
+            return true;
+        }
+        if (std::strcmp(name, "nativeStop") == 0) {
+            stop_file_watch(static_cast<uint64_t>(args[0].j));
+            return true;
+        }
+        if (std::strcmp(name, "nativePoll") == 0) {
+            FileWatchEvent event;
+            bool received;
+            {
+                VmLockRelease release;
+                received = poll_file_watch(static_cast<uint64_t>(args[0].j), &event);
+            }
+            auto* array = reinterpret_cast<DexArray*>(args[1].l);
+            if (array != nullptr && array->length > 0)
+                array->Set<int32_t>(0, received ? static_cast<int32_t>(event.mask) : 0);
+            *result = DexValue::Ref(received && !event.name.empty()
+                ? interp->linker()->NewString(event.name.c_str()) : nullptr);
+            return true;
+        }
+    }
     if (std::strcmp(desc, "Ljava/io/File;") == 0) return Invoke_java_io_File(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
@@ -5153,7 +5290,13 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
             return true;
     }
     if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Llibcore/io/Memory;") == 0)
+        return Invoke_libcore_io_Memory(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0) {
+        if (std::strcmp(name, "findResourceBacking") == 0) {
+            return Invoke_android_content_res_AssetManager(interp,
+                    "nativeResolvePackageResource", args, num_args, result);
+        }
         return Invoke_dalvik_system_BaseDexClassLoader(interp, name, args, num_args, result);
     }
 
@@ -5246,6 +5389,20 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         std::strcmp(desc, "Landroid/os/Debug;") == 0) {
         return Invoke_kudroid_memory(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/view/Surface;") == 0) {
+        if (std::strcmp(name, "nativeSetFrame") == 0 && num_args == 5) {
+            VmLockRelease unlocked;
+            *result = DexValue::Long(kudroid_surface_set_frame(args[0].j, args[1].i,
+                args[2].i, args[3].i, args[4].i));
+            return true;
+        }
+        if (std::strcmp(name, "nativeRelease") == 0 && num_args == 1) {
+            VmLockRelease unlocked;
+            bionic_ANativeWindow_release(reinterpret_cast<void*>(args[0].j));
+            return true;
+        }
+        return false;
+    }
     if (std::strcmp(desc, "Landroid/view/Window;") == 0 ||
         std::strcmp(desc, "Landroid/view/View;") == 0 ||
         std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0) {
@@ -5294,9 +5451,11 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/graphics/Bitmap;") == 0 ||
             std::strcmp(desc, "Landroid/net/ConnectivityManager;") == 0 ||
             std::strcmp(desc, "Llibcore/io/KuNet;") == 0 ||
+            std::strcmp(desc, "Llibcore/io/Memory;") == 0 ||
             std::strcmp(desc, "Llibcore/io/KuTls;") == 0 ||
             std::strcmp(desc, "Llibcore/io/KuZlib;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
+            std::strcmp(desc, "Landroid/view/Surface;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||
             std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0 ||
             std::strcmp(desc, "Landroid/opengl/GLSurfaceView;") == 0 ||

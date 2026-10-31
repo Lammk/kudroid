@@ -28,6 +28,50 @@ public final class Collections {
         sort(list, new NaturalOrder<T>());
     }
 
+    public static <T extends Object & Comparable<? super T>> T max(Collection<? extends T> values) {
+        Iterator<? extends T> iterator = values.iterator();
+        T result = iterator.next();
+        while (iterator.hasNext()) {
+            T value = iterator.next();
+            if (value.compareTo(result) > 0) result = value;
+        }
+        return result;
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static <T> T max(Collection<? extends T> values, Comparator<? super T> comparator) {
+        if (comparator == null) return (T) max((Collection) values);
+        Iterator<? extends T> iterator = values.iterator();
+        T result = iterator.next();
+        while (iterator.hasNext()) {
+            T value = iterator.next();
+            if (comparator.compare(value, result) > 0) result = value;
+        }
+        return result;
+    }
+
+    public static <T extends Object & Comparable<? super T>> T min(Collection<? extends T> values) {
+        Iterator<? extends T> iterator = values.iterator();
+        T result = iterator.next();
+        while (iterator.hasNext()) {
+            T value = iterator.next();
+            if (value.compareTo(result) < 0) result = value;
+        }
+        return result;
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static <T> T min(Collection<? extends T> values, Comparator<? super T> comparator) {
+        if (comparator == null) return (T) min((Collection) values);
+        Iterator<? extends T> iterator = values.iterator();
+        T result = iterator.next();
+        while (iterator.hasNext()) {
+            T value = iterator.next();
+            if (comparator.compare(value, result) < 0) result = value;
+        }
+        return result;
+    }
+
     @SuppressWarnings({"rawtypes", "unchecked"})
     public static void swap(List<?> list, int i, int j) {
         final List l = list;

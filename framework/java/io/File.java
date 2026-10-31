@@ -163,6 +163,16 @@ public class File implements Comparable<File> {
         return out;
     }
 
+    public File[] listFiles(FilenameFilter filter) {
+        String[] names = list();
+        if (names == null) return null;
+        java.util.ArrayList<File> kept = new java.util.ArrayList<File>();
+        for (String name : names) {
+            if (filter == null || filter.accept(this, name)) kept.add(new File(this, name));
+        }
+        return kept.toArray(new File[kept.size()]);
+    }
+
     public File[] listFiles(FileFilter filter) {
         File[] all = listFiles();
         if (all == null) {

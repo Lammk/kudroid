@@ -1,6 +1,7 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/FlutterRuntime.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -12,6 +13,8 @@
 #if defined(KUDROID_HAS_MINIZIP)
 #include <minizip/unzip.h>
 #endif
+
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
 namespace kudroid {
 namespace {
@@ -142,13 +145,36 @@ bool LibraryManager::loadRecursive(const std::string& path) {
     const fs::path normalized = fs::weakly_canonical(path, error);
     const std::string key = (error ? fs::path(path).lexically_normal() : normalized).string();
     const std::string soname = fs::path(key).filename().string();
-    if (libraries_.count(key) || libraries_.count(soname)) {
+    const auto alias = runtimeAliases_.find(path);
+    if (libraries_.count(key) ||
+        (alias != runtimeAliases_.end() && libraries_.count(alias->second))) {
         std::fprintf(stderr, "[kudroid_core] Dependency already loaded: %s\n", key.c_str());
         return true;
     }
 
+    std::string physicalPath = key;
+    if (soname == "libflutter.so") {
+        const auto resident = runtimeAliases_.find(soname);
+        if (resident != runtimeAliases_.end() && resident->second != key) {
+            lastError_ = "A substituted Flutter engine is already resident; restart before changing applications";
+            return false;
+        }
+        std::string reason;
+        const std::string candidate = bundledFlutterRuntimePath();
+        const bool substitute = isConstrainedFlutterEligible(key, candidate, reason);
+        std::string message;
+        if (substitute) {
+            physicalPath = candidate;
+            message = "Auto-substituting " + key + " with Flutter runtime " + physicalPath + ": " + reason;
+        } else {
+            message = "Keeping original Flutter engine " + key + ": " + reason;
+        }
+        std::fprintf(stderr, "[kudroid_core] %s\n", message.c_str());
+        kudroid_android_log_message(4, "kudroid_core", message.c_str());
+    }
+
     std::fprintf(stderr, "[kudroid_core] Loading ELF recursively: %s\n", key.c_str());
-    auto loader = std::make_unique<ElfLoader>(key);
+    auto loader = std::make_unique<ElfLoader>(physicalPath);
     loader->setLibraryManager(this);
     if (!loader->parse()) {
         lastError_ = "Parse failed for " + key + ": " + loader->lastError();
@@ -156,10 +182,15 @@ bool LibraryManager::loadRecursive(const std::string& path) {
         return false;
     }
 
-    const auto dependencies = parse_elf_dependencies(key.c_str());
+    const auto dependencies = parse_elf_dependencies(physicalPath.c_str());
     std::fprintf(stderr, "[kudroid_core] %s has %zu DT_NEEDED entries\n",
                  soname.c_str(), dependencies.size());
     libraries_.emplace(key, std::move(loader));
+    if (physicalPath != key) {
+        runtimeAliases_[path] = key;
+        runtimeAliases_[soname] = key;
+        runtimeAliases_[physicalPath] = key;
+    }
     invalidateCaches();
     ElfLoader* current = libraries_.at(key).get();
 
@@ -187,6 +218,10 @@ bool LibraryManager::loadRecursive(const std::string& path) {
         lastError_ = "Load failed for " + key + ": " + current->lastError();
         std::fprintf(stderr, "[kudroid_core] %s\n", lastError_.c_str());
         libraries_.erase(key);
+        for (auto aliasIt = runtimeAliases_.begin(); aliasIt != runtimeAliases_.end();) {
+            if (aliasIt->second == key) aliasIt = runtimeAliases_.erase(aliasIt);
+            else ++aliasIt;
+        }
         invalidateCaches();
         return false;
     }
@@ -246,7 +281,7 @@ void LibraryManager::invalidateCaches() {
     appSymbolCache_.clear();
 }
 
-void* LibraryManager::resolveGlobalSymbol(const char* name) const {
+void* LibraryManager::resolveGlobalSymbol(const char* name, bool allowDummy) const {
     if (!name || !*name) return nullptr;
     if (isGuardShimSymbol(name)) {
         void* shim = resolve_bionic_symbol(name);
@@ -255,7 +290,9 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
 
     auto cached = globalSymbolCache_.find(name);
-    if (cached != globalSymbolCache_.end()) return cached->second;
+    if (cached != globalSymbolCache_.end()) {
+        return !allowDummy && is_universal_dummy(cached->second) ? nullptr : cached->second;
+    }
 
     void* resolved = nullptr;
     for (const auto& key : sortedKeys()) {
@@ -269,8 +306,8 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
             break;
         }
     }
-    if (resolved == nullptr) resolved = resolve_bionic_symbol(name);
-    globalSymbolCache_.emplace(name, resolved);
+    if (resolved == nullptr) resolved = resolve_bionic_symbol(name, allowDummy);
+    if (resolved) globalSymbolCache_.emplace(name, resolved);
     return resolved;
 }
 
@@ -313,6 +350,11 @@ std::vector<std::pair<std::string, void*>> LibraryManager::resolveAllSymbols(con
 void* LibraryManager::resolveSymbolInLib(const std::string& libPattern, const char* name) const {
     if (!name || !*name) return nullptr;
     std::lock_guard<std::recursive_mutex> lock(mtx_);
+    const auto alias = runtimeAliases_.find(libPattern);
+    if (alias != runtimeAliases_.end()) {
+        const auto loaded = libraries_.find(alias->second);
+        if (loaded != libraries_.end()) return loaded->second->getSymbolAddress(name);
+    }
     for (const auto& [key, loader] : libraries_) {
         if (key.find(libPattern) != std::string::npos) {
             void* address = loader->getSymbolAddress(name);

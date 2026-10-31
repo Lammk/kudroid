@@ -77,6 +77,11 @@ public class InputDevice {
         return mId;
     }
 
+    // No controller is assigned by the input backend.
+    public int getControllerNumber() {
+        return 0;
+    }
+
     public String getName() {
         return mName;
     }

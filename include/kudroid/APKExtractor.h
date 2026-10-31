@@ -21,6 +21,8 @@ namespace kudroid {
 struct MetaDataEntry {
     std::string name;
     std::string value;
+    uint8_t valueType = 0;
+    bool isResource = false;
 };
 
 // One <activity> / <activity-alias> declared in AndroidManifest.xml.

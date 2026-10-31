@@ -1,73 +1,47 @@
-// Native wait primitive behind android.os.MessageQueue, plus the touch wake.
-//
-// Kept in its own translation unit on purpose: this code needs
-// <condition_variable>, whose include chain reaches <wchar.h> and leaves FILE
-// only forward-declared. If a file that also pulls in jni.h (-> <stdio.h>)
-// includes <condition_variable> first, libstdc++/glibc 13 compiles
-// <bits/stdio.h> against an incomplete FILE and the build fails. Nothing here
-// includes jni.h, so the two never mix.
-//
-// AOSP's MessageQueue blocks in native epoll and registers the window's input
-// channel fd as a second wake source, so input is delivered to the Looper
-// thread by native code (InputEventReceiver.dispatchInputEvent). KuDroid's Java
-// MessageQueue used to block in Object.wait(), which can only be woken by a
-// Java notify — an interpreted call that needs the global VM lock. Touch
-// delivery therefore needed a second thread holding that lock, serializing
-// touch against the renderer. This slot is the native condition the queue waits
-// on: a message enqueue and a touch injection both set `pending` and signal it,
-// so only the Looper thread ever runs Java for touch.
+// Java queues and native descriptor callbacks share the owning thread's looper.
 
-#include <chrono>
-#include <condition_variable>
+#include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <mutex>
 #include <new>
 
+extern "C" void* bionic_ALooper_prepare(int);
+extern "C" void bionic_ALooper_acquire(void*);
+extern "C" void bionic_ALooper_release(void*);
+extern "C" void bionic_ALooper_wake(void*);
+extern "C" int bionic_ALooper_pollOnce(int, int*, int*, void**);
+
 struct LooperWaitSlot {
-    std::mutex mtx;
-    std::condition_variable cv;
-    bool pending = false;
+    void* looper = nullptr;
 };
 static std::mutex g_mainLooperMutex;
 static LooperWaitSlot* g_mainLooperSlot = nullptr;
 
 extern "C" int64_t kudroid_looper_init(void) {
-    return reinterpret_cast<int64_t>(new (std::nothrow) LooperWaitSlot());
+    auto* slot = new (std::nothrow) LooperWaitSlot();
+    if (slot == nullptr) return 0;
+    slot->looper = bionic_ALooper_prepare(1);
+    if (slot->looper == nullptr) {
+        delete slot;
+        return 0;
+    }
+    bionic_ALooper_acquire(slot->looper);
+    return reinterpret_cast<int64_t>(slot);
 }
 
 extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis) {
     auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
     if (slot == nullptr) return;
-    std::unique_lock<std::mutex> lock(slot->mtx);
-    // Consume an already-set wake first: an enqueue or touch that landed before
-    // this wait must not be slept through.
-    if (slot->pending) {
-        slot->pending = false;
-        return;
-    }
-    if (timeout_millis < 0) {
-        slot->cv.wait(lock, [slot] { return slot->pending; });
-    } else if (timeout_millis > 0) {
-        slot->cv.wait_for(lock, std::chrono::milliseconds(timeout_millis),
-                          [slot] { return slot->pending; });
-    }
-    slot->pending = false;
+    const int timeout = timeout_millis < 0 ? -1 :
+        static_cast<int>(std::min<int64_t>(timeout_millis, INT_MAX));
+    bionic_ALooper_pollOnce(timeout, nullptr, nullptr, nullptr);
 }
 
 extern "C" void kudroid_looper_wake(int64_t ptr) {
     auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
     if (slot == nullptr) return;
-    bool alreadyPending = false;
-    {
-        std::lock_guard<std::mutex> lock(slot->mtx);
-        alreadyPending = slot->pending;
-        slot->pending = true;
-    }
-    // A drag sets this hundreds of times a second. A waiter that has not consumed
-    // the flag yet is already going to wake and see the flag set, so the second
-    // futex wake (and the scheduling nudge it gives the UI thread mid-frame) buys
-    // nothing; only the false->true transition has a thread to wake.
-    if (!alreadyPending) slot->cv.notify_all();
+    bionic_ALooper_wake(slot->looper);
 }
 
 extern "C" void kudroid_looper_set_main(int64_t ptr) {
@@ -99,5 +73,6 @@ extern "C" void kudroid_looper_destroy(int64_t ptr) {
         std::lock_guard<std::mutex> lock(g_mainLooperMutex);
         if (g_mainLooperSlot == slot) g_mainLooperSlot = nullptr;
     }
+    bionic_ALooper_release(slot->looper);
     delete slot;
 }

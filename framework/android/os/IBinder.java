@@ -13,6 +13,7 @@ public interface IBinder {
     public static final int LAST_CALL_TRANSACTION = 0x00ffffff;
     /** Transact flag: one-way, no reply waiting. */
     public static final int FLAG_ONEWAY = 0x00000001;
+    public static final int INTERFACE_TRANSACTION = 0x5f4e5446;
 
     /**
      * Callback when the other end dies. All KuDroid binders are in the same process
@@ -37,7 +38,7 @@ public interface IBinder {
      */
     boolean pingBinder();
 
-    boolean transact(int code, Parcel data, Parcel reply, int flags);
+    boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException;
 
     void linkToDeath(DeathRecipient recipient, int flags);
 

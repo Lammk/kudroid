@@ -18,6 +18,7 @@
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/ThermalShim.h"
 #include "kudroid/platform/FramePacer.h"
+#include "kudroid/platform/SystemFonts.h"
 #include "kudroid/Log.h"
 #include "kudroid/ExecMemory.h"
 
@@ -411,6 +412,18 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         log += "[kudroid_core] ERROR: null or empty app name\n";
     } else {
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
+        const auto fontSource = kudroid::bundledSystemFontsPath();
+        if (!fontSource.empty()) {
+            std::string fontError;
+            if (!kudroid::provisionSystemFonts(remapper.androidRoot(), fontSource, fontError)) {
+                const auto message = "[kudroid_core] System font provisioning failed: " + fontError;
+                log += message + "\n";
+                std::fprintf(stderr, "%s\n", message.c_str());
+                logCoreLine(6, message);
+            } else {
+                logCoreLine(2, "[kudroid_core] System fonts ready");
+            }
+        }
         std::string resolvedAppName = appName;
         std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / resolvedAppName;
 
@@ -1190,15 +1203,18 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     const std::vector<kudroid::MetaDataEntry>& meta) {
                                     if (meta.empty()) return;
                                     std::vector<const char*> keys, values;
+                                    std::vector<int> types;
                                     keys.reserve(meta.size());
                                     values.reserve(meta.size());
+                                    types.reserve(meta.size());
                                     for (const auto& m : meta) {
                                         keys.push_back(m.name.c_str());
                                         values.push_back(m.value.c_str());
+                                        types.push_back(m.valueType | (m.isResource ? 0x100 : 0));
                                     }
-                                    kuart_register_component_meta_data(
+                                    kuart_register_component_meta_data_typed(
                                         component.c_str(), keys.data(), values.data(),
-                                        static_cast<int>(keys.size()));
+                                        types.data(), static_cast<int>(keys.size()));
                                     appendAndEcho("[kudroid_core] meta-data registered for " +
                                                   (component.empty() ? std::string("<application>")
                                                                      : component) +

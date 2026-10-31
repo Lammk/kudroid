@@ -101,6 +101,10 @@ public final class AssetManager implements AutoCloseable {
         }
 
         public int read(byte[] b, int off, int len) throws IOException {
+            if (b == null) throw new NullPointerException("b == null");
+            if (off < 0 || len < 0 || off > b.length - len)
+                throw new IndexOutOfBoundsException();
+            if (len == 0) return 0;
             if (mRemaining <= 0) return -1;
             int n = super.read(b, off, (int) Math.min(len, mRemaining));
             if (n > 0) mRemaining -= n;
@@ -108,9 +112,14 @@ public final class AssetManager implements AutoCloseable {
         }
 
         public long skip(long n) throws IOException {
+            if (n <= 0) return 0;
             long k = super.skip(Math.min(n, mRemaining));
             mRemaining -= k;
             return k;
+        }
+
+        public int available() throws IOException {
+            return (int) Math.min(super.available(), mRemaining);
         }
     }
     public AssetFileDescriptor openFd(String fileName) throws IOException {

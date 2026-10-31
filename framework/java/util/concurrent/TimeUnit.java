@@ -16,40 +16,31 @@ public enum TimeUnit {
         this.nanosPerUnit = nanosPerUnit;
     }
 
-    public long toNanos(long duration) {
-        return duration * nanosPerUnit;
+    private long scale(long duration, long target) {
+        if (nanosPerUnit <= target) return duration / (target / nanosPerUnit);
+        long factor = nanosPerUnit / target;
+        long limit = Long.MAX_VALUE / factor;
+        if (duration > limit) return Long.MAX_VALUE;
+        if (duration < -limit) return Long.MIN_VALUE;
+        return duration * factor;
     }
 
-    public long toMicros(long duration) {
-        return toNanos(duration) / 1000L;
-    }
-
-    public long toMillis(long duration) {
-        return toNanos(duration) / 1000000L;
-    }
-
-    public long toSeconds(long duration) {
-        return toNanos(duration) / 1000000000L;
-    }
-
-    public long toMinutes(long duration) {
-        return toSeconds(duration) / 60L;
-    }
-
-    public long toHours(long duration) {
-        return toMinutes(duration) / 60L;
-    }
-
-    public long toDays(long duration) {
-        return toHours(duration) / 24L;
-    }
-
+    public long toNanos(long duration) { return scale(duration, 1L); }
+    public long toMicros(long duration) { return scale(duration, 1000L); }
+    public long toMillis(long duration) { return scale(duration, 1000000L); }
+    public long toSeconds(long duration) { return scale(duration, 1000000000L); }
+    public long toMinutes(long duration) { return scale(duration, 60000000000L); }
+    public long toHours(long duration) { return scale(duration, 3600000000000L); }
+    public long toDays(long duration) { return scale(duration, 86400000000000L); }
     public long convert(long duration, TimeUnit sourceUnit) {
-        return sourceUnit.toNanos(duration) / nanosPerUnit;
+        return sourceUnit.scale(duration, nanosPerUnit);
     }
-
     public void sleep(long timeout) throws InterruptedException {
-        long nanos = toNanos(timeout);
-        Thread.sleep(nanos / 1000000L, (int) (nanos % 1000000L));
+        if (timeout > 0) {
+            long millis = toMillis(timeout);
+            int nanos = nanosPerUnit < 1000000L ?
+                    (int) ((timeout % (1000000L / nanosPerUnit)) * nanosPerUnit) : 0;
+            Thread.sleep(millis, nanos);
+        }
     }
 }

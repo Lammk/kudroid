@@ -94,7 +94,9 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
             mCreated = true;
             mWidth = width;
             mHeight = height;
-            mSurface.setSurfaceSize(width, height);
+            int[] location = new int[2];
+            mView.getLocationInWindow(location);
+            mSurface.setSurfaceFrame(location[0], location[1], width, height);
             CallbackState[] callbacks;
             synchronized (mCallbacks) {
                 callbacks = mCallbacks.toArray(new CallbackState[mCallbacks.size()]);

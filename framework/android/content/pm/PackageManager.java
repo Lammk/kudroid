@@ -7,6 +7,7 @@ import java.util.List;
 public abstract class PackageManager {
     public static final int GET_ACTIVITIES = 1;
     public static final int GET_SERVICES = 4;
+    public static final int GET_PROVIDERS = 8;
     public static final int GET_PERMISSIONS = 4096;
     public static final int GET_SIGNATURES = 64;
     public static final int GET_SIGNING_CERTIFICATES = 0x08000000;
@@ -85,7 +86,36 @@ public abstract class PackageManager {
             "android.hardware.vulkan.version";
 
     public abstract PackageInfo getPackageInfo(String packageName, int flags) throws NameNotFoundException;
+    public abstract List<PackageInfo> getInstalledPackages(int flags);
     public abstract ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException;
+
+    public boolean isInstantApp() { return false; }
+    public abstract String getNameForUid(int uid);
+    public abstract ActivityInfo getReceiverInfo(ComponentName component, int flags)
+            throws NameNotFoundException;
+
+    public abstract ProviderInfo resolveContentProvider(String authority, int flags);
+
+    public CharSequence getApplicationLabel(ApplicationInfo info) { return info.loadLabel(this); }
+
+    public abstract android.content.res.Resources getResourcesForApplication(ApplicationInfo info)
+            throws NameNotFoundException;
+
+    public android.content.res.Resources getResourcesForApplication(String packageName)
+            throws NameNotFoundException {
+        return getResourcesForApplication(getApplicationInfo(packageName, 0));
+    }
+
+    public CharSequence getText(String packageName, int resourceId, ApplicationInfo info) {
+        try {
+            return (info == null ? getResourcesForApplication(packageName)
+                    : getResourcesForApplication(info)).getText(resourceId);
+        } catch (NameNotFoundException exception) {
+            return null;
+        } catch (android.content.res.Resources.NotFoundException exception) {
+            return null;
+        }
+    }
 
     /** Description of a declared activity, including its manifest meta-data. */
     public abstract ActivityInfo getActivityInfo(ComponentName component, int flags)
@@ -99,6 +129,12 @@ public abstract class PackageManager {
     public abstract boolean hasSystemFeature(String name, int version);
     public abstract ResolveInfo resolveActivity(Intent intent, int flags);
     public abstract List<ResolveInfo> queryIntentActivities(Intent intent, int flags);
+
+    // No service intent filters are registered in the package database.
+    public List<ResolveInfo> queryIntentServices(Intent intent, int flags) {
+        if (intent == null) throw new NullPointerException("intent == null");
+        return java.util.Collections.emptyList();
+    }
 
     /**
      * Installer of record, or null when unknown.

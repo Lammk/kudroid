@@ -1,5 +1,6 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/ElfX18.h"
+#include "kudroid/ElfPackedRelocations.h"
 #include "kudroid/BionicShim.h"
 #include "kudroid/ExecMemory.h"
 #include "kudroid/FmodVorbisFallback.h"
@@ -98,6 +99,7 @@ struct Elf64Phdr {
 static const uint8_t ELF_MAGIC[4] = {0x7f, 'E', 'L', 'F'};
 static const uint16_t EM_AARCH64 = 0xB7;
 static const uint16_t EM_X86_64   = 0x3E;
+static const uint16_t SHN_ABS = 0xfff1;
 
 static const char* machine_name(uint16_t machine) {
     switch (machine) {
@@ -1020,6 +1022,9 @@ bool ElfLoader::relocate() {
     // The mapping will now fault. Relocate writes addend/symbol to .got/.data in
     // JIT area, so write-protect must be temporarily disabled during this process.
     pthread_jit_write_protect_np(0);
+    struct RestoreJitProtection {
+        ~RestoreJitProtection() { pthread_jit_write_protect_np(1); }
+    } restoreJitProtection;
 #endif
     // Split mode seals nothing until applyProtections(); the data suffix is plain
     // RW and the prefix is written through the backing view, so writes below need
@@ -1045,7 +1050,8 @@ bool ElfLoader::relocate() {
 
     uint64_t relaVaddr = 0, relaSize = 0, relaEnt = sizeof(Elf64Rela);
     uint64_t jmpRelVaddr = 0, jmpRelSize = 0;
-    uint64_t relrVaddr = 0, relrSize = 0;
+    uint64_t relrVaddr = 0, relrSize = 0, relrEnt = 8;
+    uint64_t packedVaddr = 0, packedSize = 0, packedCount = 0;
     uint64_t symtabVaddr = 0, strtabVaddr = 0, strsz = 0;
     for (size_t i = 0; i < dynamicCount && dynamic[i].d_tag != DT_NULL; ++i) {
         switch (dynamic[i].d_tag) {
@@ -1054,8 +1060,18 @@ bool ElfLoader::relocate() {
             case DT_RELAENT: relaEnt = dynamic[i].d_val; break;
             case DT_JMPREL: jmpRelVaddr = dynamic[i].d_val; break;
             case DT_PLTRELSZ: jmpRelSize = dynamic[i].d_val; break;
-            case DT_RELR: relrVaddr = dynamic[i].d_val; break;
-            case DT_RELRSZ: relrSize = dynamic[i].d_val; break;
+            case DT_RELR:
+            case 0x6fffe000: relrVaddr = dynamic[i].d_val; break;
+            case DT_RELRSZ:
+            case 0x6fffe001: relrSize = dynamic[i].d_val; break;
+            case DT_RELRENT:
+            case 0x6fffe003: relrEnt = dynamic[i].d_val; break;
+            case 0x60000011: packedVaddr = dynamic[i].d_val; break;
+            case 0x60000012: packedSize = dynamic[i].d_val; break;
+            case 0x6000000f:
+            case 0x60000010:
+                lastError_ = "Android packed REL is unsupported for ELF64/AArch64";
+                return false;
             case DT_SYMTAB: symtabVaddr = dynamic[i].d_val; break;
             case DT_STRTAB: strtabVaddr = dynamic[i].d_val; break;
             case DT_STRSZ: strsz = dynamic[i].d_val; break;
@@ -1069,11 +1085,13 @@ bool ElfLoader::relocate() {
         }
     }
 
-    auto vaddrToFileOffset = [&](uint64_t vaddr) -> uint64_t {
+    auto vaddrToFileOffset = [&](uint64_t vaddr, uint64_t size = 1) -> uint64_t {
         for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
             const auto& phdr = phdrs[i];
-            if (phdr.p_type == 1 && vaddr >= phdr.p_vaddr &&
-                vaddr - phdr.p_vaddr < phdr.p_filesz) {
+            if (phdr.p_type == 1 && phdr.p_offset <= fileSize_ &&
+                phdr.p_filesz <= fileSize_ - phdr.p_offset && vaddr >= phdr.p_vaddr &&
+                vaddr - phdr.p_vaddr <= phdr.p_filesz &&
+                size <= phdr.p_filesz - (vaddr - phdr.p_vaddr)) {
                 return phdr.p_offset + (vaddr - phdr.p_vaddr);
             }
         }
@@ -1094,8 +1112,31 @@ bool ElfLoader::relocate() {
     // .gnu.hash/.hash is between → valid symbolIndex is still outside this limit
     // or considered trash (similar to bug getSymbolAddress → SIGILL Discord).
     size_t symbolCount = countDynsymSymbols(fileData_, fileSize_, ehdr, phdrs);
-    if (symbolCount == 0) {
+    if (symbolCount == 0 && strtabOffset > symtabOffset) {
         symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
+    }
+    if (symbolCount > (fileSize_ - symtabOffset) / sizeof(Elf64Sym)) {
+        lastError_ = "Invalid dynamic symbol count";
+        return false;
+    }
+    if (relaEnt != sizeof(Elf64Rela)) {
+        lastError_ = "Invalid RELA entry size";
+        return false;
+    }
+
+    auto mappedRange = [&](uint64_t vaddr, uint64_t size) {
+        for (const auto& seg : segments_) {
+            if (vaddr >= seg.vaddr && vaddr - seg.vaddr <= seg.memsz &&
+                size <= seg.memsz - (vaddr - seg.vaddr)) return true;
+        }
+        return false;
+    };
+    for (const auto& table : {std::pair<uint64_t, uint64_t>{init_array_, init_arraysz_},
+                              std::pair<uint64_t, uint64_t>{fini_array_, fini_arraysz_}}) {
+        if (table.second && (table.second % 8 || !mappedRange(table.first, table.second))) {
+            lastError_ = "Invalid initializer array";
+            return false;
+        }
     }
 
 #ifndef R_AARCH64_COPY
@@ -1118,97 +1159,118 @@ bool ElfLoader::relocate() {
         return writePtrAt(imageOff);
     };
 
+    auto applyOne = [&](const PackedRela& reloc) -> bool {
+        const uint32_t type = static_cast<uint32_t>(reloc.info & 0xffffffffu);
+        const uint32_t symbolIndex = static_cast<uint32_t>(reloc.info >> 32);
+        if (type == 0) return true;
+        if (!mappedRange(reloc.offset, sizeof(uint64_t))) {
+            lastError_ = "Relocation target outside PT_LOAD";
+            return false;
+        }
+        auto* target = reinterpret_cast<uint64_t*>(writeAt(reloc.offset - minVaddr_));
+        if (type == R_AARCH64_RELATIVE) {
+            *target = reinterpret_cast<uintptr_t>(base_) + reloc.addend;
+        } else if (type == R_AARCH64_IRELATIVE) {
+            typedef uintptr_t (*ifunc_resolver_t)(void);
+            auto resolver = reinterpret_cast<ifunc_resolver_t>(
+                static_cast<char*>(base_) + reloc.addend);
+            *target = resolver ? resolver() : 0;
+        } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64 || type == R_AARCH64_COPY) {
+            if (symbolIndex >= symbolCount || symtab[symbolIndex].st_name >= strsz) {
+                lastError_ = "Invalid relocation symbol index";
+                return false;
+            }
+            const char* name = strtab + symtab[symbolIndex].st_name;
+            if (!std::memchr(name, 0, strsz - symtab[symbolIndex].st_name)) {
+                lastError_ = "Unterminated relocation symbol name";
+                return false;
+            }
+            void* address = nullptr;
+            // Weak imports bind available definitions and otherwise remain null.
+            const bool isWeakUndef = (symtab[symbolIndex].st_shndx == 0) &&
+                                     ((symtab[symbolIndex].st_info >> 4) == 2);
+            if (symbolIndex == 0) {
+                // Symbol index zero contributes a zero address.
+            } else if (symtab[symbolIndex].st_shndx == SHN_ABS) {
+                address = reinterpret_cast<void*>(symtab[symbolIndex].st_value);
+            } else if (symtab[symbolIndex].st_shndx != 0) {
+                address = static_cast<char*>(base_) + symtab[symbolIndex].st_value;
+            } else if (libraryManager_) {
+                address = libraryManager_->resolveGlobalSymbol(name, !isWeakUndef);
+                if (!address) address = resolve_bionic_symbol(name, !isWeakUndef);
+            } else {
+                address = resolve_bionic_symbol(name, !isWeakUndef);
+            }
+            if (!address && !isWeakUndef && symbolIndex != 0) {
+                // Record unresolved imports before guest execution.
+                fprintf(stderr,
+                        "[KuDroidELF] WARNING: Unresolved symbol '%s' in %s (type=%u, offset=0x%llx, addend=0x%llx)\n",
+                        name, path_.c_str(), type,
+                        (unsigned long long)reloc.offset,
+                        (unsigned long long)reloc.addend);
+            }
+
+            if (type == R_AARCH64_COPY) {
+                if (!mappedRange(reloc.offset, symtab[symbolIndex].st_size)) {
+                    lastError_ = "COPY relocation outside PT_LOAD";
+                    return false;
+                }
+                if (address) {
+                    memcpy(target, address, symtab[symbolIndex].st_size);
+                }
+            } else {
+                // Absolute relocations add A even when the symbol address is zero.
+                *target = reinterpret_cast<uintptr_t>(address) + reloc.addend;
+            }
+        } else if (type == R_AARCH64_TLS_DTPMOD64) {
+            *target = 1; // module id (1 for main library)
+        } else if (type == R_AARCH64_TLS_DTPREL64 || type == R_AARCH64_TLS_TPREL64) {
+            if (symbolIndex >= symbolCount) {
+                lastError_ = "Invalid TLS relocation symbol index";
+                return false;
+            }
+            // Bias = position of the module's TLS template relative to the guest thread pointer
+            // (this value is set by kudroid_tls_set_template in the TLS block).
+            const uint64_t tlsBias = kudroid_tls_module_offset();
+            if (symbolIndex != 0) {
+                *target = symtab[symbolIndex].st_value + reloc.addend + tlsBias;
+            } else {
+                *target = reloc.addend + tlsBias;
+            }
+        } else {
+            lastError_ = "Unsupported AArch64 relocation type: " +
+                         std::to_string(type);
+            return false;
+        }
+        return true;
+    };
+
     auto applyRelocations = [&](uint64_t vaddr, uint64_t size) -> bool {
         if (size == 0) return true;
-        const uint64_t offset = vaddrToFileOffset(vaddr);
-        if (offset == UINT64_MAX || relaEnt != sizeof(Elf64Rela) ||
-            size % relaEnt != 0 || size > fileSize_ - offset) {
+        const uint64_t offset = vaddrToFileOffset(vaddr, size);
+        if (offset == UINT64_MAX || size % relaEnt != 0 || size > fileSize_ - offset) {
             lastError_ = "Invalid relocation table";
             return false;
         }
-        const auto* relocs = reinterpret_cast<const Elf64Rela*>(
-            fileData_ + offset);
+        const auto* relocs = reinterpret_cast<const Elf64Rela*>(fileData_ + offset);
         for (uint64_t i = 0; i < size / relaEnt; ++i) {
-            const uint32_t type = static_cast<uint32_t>(relocs[i].r_info & 0xffffffffu);
-            const uint32_t symbolIndex = static_cast<uint32_t>(relocs[i].r_info >> 32);
-            auto* target = reinterpret_cast<uint64_t*>(
-                writeAt(relocs[i].r_offset - minVaddr_));
-            if (type == R_AARCH64_RELATIVE) {
-                *target = reinterpret_cast<uintptr_t>(base_) + relocs[i].r_addend;
-            } else if (type == R_AARCH64_IRELATIVE) {
-                typedef uintptr_t (*ifunc_resolver_t)(void);
-                auto resolver = reinterpret_cast<ifunc_resolver_t>(
-                    static_cast<char*>(base_) + relocs[i].r_addend);
-                *target = resolver ? resolver() : 0;
-            } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64 || type == R_AARCH64_COPY) {
-                if (symbolIndex >= symbolCount || symtab[symbolIndex].st_name >= strsz) {
-                    lastError_ = "Invalid relocation symbol index";
-                    return false;
-                }
-                const char* name = strtab + symtab[symbolIndex].st_name;
-                void* address = nullptr;
-                // Weak undefined (STB_WEAK + SHN_UNDEF): Android linker STILL
-                // bind to the strong symbol if it exists in the loaded libs
-                // (e.g. strlcpy/strlcat is in bionic libc). Only if NOT looking
-                // If you see it anywhere, keep 0 — the caller code always has `cbz x8, skip`
-                // ahead to handle null branches (feature detection). Bind hard
-                // nullptr previously caused slot GOT = 0 even though shim HAS that function → profit
-                // call via PLT jump to pc=0x0 → SIGSEGV fault_addr=0x0 exactly as
-                // crash Minecraft/libmaesdk (register x0/x1/x2 matches strlcpy).
-                const bool isWeakUndef = (symtab[symbolIndex].st_shndx == 0) &&
-                                         ((symtab[symbolIndex].st_info >> 4) == 2);
-                if (symtab[symbolIndex].st_shndx != 0) {
-                    address = static_cast<char*>(base_) + symtab[symbolIndex].st_value;
-                } else if (libraryManager_) {
-                    address = libraryManager_->resolveGlobalSymbol(name);
-                    if (!address) address = resolve_bionic_symbol(name);
-                } else {
-                    address = resolve_bionic_symbol(name);
-                }
-                // isWeakUndef is now only used to silence the warning when the symbol is real
-                // does not exist — the correct behavior of linker: weak undef does not exist
-                // Wherever slot = 0, the caller automatically checks for null.
-                
-                if (!address && !isWeakUndef) {
-                    // All symbols cannot be resolved — not just STB_GLOBAL — because of GOT
-                    // slot at that time = 0 + addend (possibly a junk address in the data),
-                    // Guest calls through this slot → SIGILL/SIGSEGV (suspect in Discord case).
-                    // Print type + r_offset to know exactly which slot in the module is broken.
-                    fprintf(stderr,
-                            "[KuDroidELF] WARNING: Unresolved symbol '%s' in %s (type=%u, offset=0x%llx, addend=0x%llx)\n",
-                            name, path_.c_str(), type,
-                            (unsigned long long)relocs[i].r_offset,
-                            (unsigned long long)relocs[i].r_addend);
-                }
-                
-                if (type == R_AARCH64_COPY) {
-                    if (address) {
-                        memcpy(target, address, symtab[symbolIndex].st_size);
-                    }
-                } else {
-                    // IMPORTANT: If address == nullptr (weak symbol not found),
-                    // assign true 0 (NULL). Do not add addend to NULL because it will create an address
-                    // Small garbage (eg 0x18/0x20) makes the app think the pointer is valid and then crashes SIGSEGV.
-                    *target = address ? (reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend) : 0;
-                }
-            } else if (type == R_AARCH64_TLS_DTPMOD64) {
-                *target = 1; // module id (1 for main library)
-            } else if (type == R_AARCH64_TLS_DTPREL64 || type == R_AARCH64_TLS_TPREL64) {
-                // Bias = position of the module's TLS template relative to the guest thread pointer
-                // (this value is set by kudroid_tls_set_template in the TLS block).
-                const uint64_t tlsBias = kudroid_tls_module_offset();
-                if (symbolIndex != 0) {
-                    *target = symtab[symbolIndex].st_value + relocs[i].r_addend + tlsBias;
-                } else {
-                    *target = relocs[i].r_addend + tlsBias;
-                }
-            } else {
-                lastError_ = "Unsupported AArch64 relocation type: " +
-                             std::to_string(type);
-                return false;
-            }
+            if (!applyOne({relocs[i].r_offset, relocs[i].r_info, relocs[i].r_addend})) return false;
         }
         return true;
+    };
+
+    auto applyPacked = [&]() -> bool {
+        if (packedSize == 0) return true;
+        const uint64_t offset = vaddrToFileOffset(packedVaddr, packedSize);
+        if (offset == UINT64_MAX || packedSize > fileSize_ - offset) {
+            lastError_ = "Invalid Android packed RELA table";
+            return false;
+        }
+        return decodeAndroidPackedRela(reinterpret_cast<const uint8_t*>(fileData_ + offset),
+                                       packedSize, [&](const PackedRela& reloc) {
+                                           ++packedCount;
+                                           return applyOne(reloc);
+                                       }, lastError_);
     };
 
     // DT_RELR — packed relative relocations (NDK r23+ default for arm64).
@@ -1223,9 +1285,9 @@ bool ElfLoader::relocate() {
     // (not in the entry), so the way to apply is to ADD the load bias to the current value
     // yes — exactly like glibc/musl/Android linker (*(addr) += load_bias).
     auto applyRelr = [&]() -> bool {
-        if (relrVaddr == 0 || relrSize == 0) return true;
-        const uint64_t offset = vaddrToFileOffset(relrVaddr);
-        if (offset == UINT64_MAX || relrSize > fileSize_ - offset || relrSize % 8 != 0) {
+        if (relrSize == 0) return true;
+        const uint64_t offset = vaddrToFileOffset(relrVaddr, relrSize);
+        if (offset == UINT64_MAX || relrEnt != 8 || relrSize > fileSize_ - offset || relrSize % 8 != 0) {
             lastError_ = "Invalid RELR table";
             return false;
         }
@@ -1244,13 +1306,25 @@ bool ElfLoader::relocate() {
                 const uint64_t base = lastAddr; // base = address of previous single entry
                 for (uint64_t bit = 1; bit < 64; ++bit) {
                     if (entry & (1ULL << bit)) {
+                        if (base > UINT64_MAX - bit * 8 || !mappedRange(base + bit * 8, 8)) {
+                            lastError_ = "RELR bitmap target outside PT_LOAD";
+                            return false;
+                        }
                         const uint64_t vaddr = base + bit * 8;
                         *reinterpret_cast<uint64_t*>(writeAt(vaddr - minVaddr_)) += bias;
                     }
                 }
+                if (base > UINT64_MAX - 63 * 8) {
+                    lastError_ = "RELR bitmap address overflow";
+                    return false;
+                }
                 lastAddr = base + 63 * 8;
             } else {
                 const uint64_t vaddr = entry;
+                if (!mappedRange(vaddr, 8)) {
+                    lastError_ = "RELR target outside PT_LOAD";
+                    return false;
+                }
                 *reinterpret_cast<uint64_t*>(writeAt(vaddr - minVaddr_)) += bias;
                 lastAddr = vaddr;
             }
@@ -1258,28 +1332,27 @@ bool ElfLoader::relocate() {
         return true;
     };
 
-    const bool ok = applyRelocations(relaVaddr, relaSize) &&
+    bool ok = applyPacked() && applyRelocations(relaVaddr, relaSize) &&
                     applyRelocations(jmpRelVaddr, jmpRelSize) &&
                     applyRelr();
     fprintf(stderr,
-            "[KuDroidELF] relocate(%s): RELA=%llu entries, JMPREL=%llu, RELR=%llu bytes, symtab=%s\n",
+            "[KuDroidELF] relocate(%s): RELA=%llu entries, JMPREL=%llu, APS2=%llu entries, RELR=%llu bytes, symtab=%s\n",
             path_.c_str(),
             static_cast<unsigned long long>(relaSize / relaEnt),
             static_cast<unsigned long long>(relaEnt ? jmpRelSize / relaEnt : 0),
+            static_cast<unsigned long long>(packedCount),
             static_cast<unsigned long long>(relrSize),
             symtabVaddr != 0 ? "present" : "absent");
 
     if (ok) {
-        applyProtections();
+        ok = applyProtections();
+        if (!ok) lastError_ = "Failed to apply ELF segment protections";
     }
 
-#if defined(__APPLE__) && TARGET_OS_OSX
-    pthread_jit_write_protect_np(1);
-#endif
     return ok;
 }
 
-/// Writable host address for guest image offset `vaddr` (ELF vaddr, unslid).
+/// Writable host address for an offset from the first PT_LOAD.
 /// Under split-image mapping the exec prefix is written through the backing
 /// view; the data suffix through the guest-visible mapping itself. Relocation
 /// targets in the prefix are read back through the RX alias so values are the
@@ -1294,7 +1367,7 @@ char* ElfLoader::writePtrAt(std::uint64_t vaddr) {
     if (preparedImage_) {
         return static_cast<char*>(writeBase_) + vaddr;
     }
-    return static_cast<char*>(base_) + vaddr;
+    return static_cast<char*>(base_) + minVaddr_ + vaddr;
 }
 
 bool ElfLoader::applyProtections() {
@@ -1328,7 +1401,7 @@ bool ElfLoader::applyProtections() {
     for (const auto& seg : segments_) {
         const uint64_t segmentStart = seg.vaddr - minVaddr;
         const uint64_t segmentEnd = segmentStart + seg.memsz;
-        
+
         int segmentProt = 0;
         if (seg.flags & 4) segmentProt |= PROT_READ;
         if (seg.flags & 2) segmentProt |= PROT_WRITE;
@@ -1550,15 +1623,15 @@ void ElfLoader::registerEhFrame() {
     auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
     // Bounds check: read minimum 8 bytes (version+3 enc + 4 byte pointer).
     if (eh_frame_memsz_ < 8) return;
-    
+
     // header format:
     // uint8_t version; (must be 1)
     // uint8_t eh_frame_ptr_enc;
     // uint8_t fde_count_enc;
     // uint8_t table_enc;
-    
+
     if (hdr[0] != 1) return; // unknown version
-    
+
     // dw_eh_pe_pcrel | dw_eh_pe_sdata4 (0x1b) is the most common
     if (hdr[1] == 0x1B) {
         // pointer is a 32-bit signed offset from the pointer's address
@@ -1566,7 +1639,7 @@ void ElfLoader::registerEhFrame() {
         int32_t offset = *ptr_addr;
         void* eh_frame_actual = reinterpret_cast<void*>(
             reinterpret_cast<uintptr_t>(ptr_addr) + offset);
-        
+
         __register_frame(eh_frame_actual);
     }
 }
@@ -1577,13 +1650,13 @@ void ElfLoader::deregisterEhFrame() {
     auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
     if (eh_frame_memsz_ < 8) return;
     if (hdr[0] != 1) return;
-    
+
     if (hdr[1] == 0x1B) {
         const int32_t* ptr_addr = reinterpret_cast<const int32_t*>(hdr + 4);
         int32_t offset = *ptr_addr;
         void* eh_frame_actual = reinterpret_cast<void*>(
             reinterpret_cast<uintptr_t>(ptr_addr) + offset);
-        
+
         __deregister_frame(eh_frame_actual);
     }
 }

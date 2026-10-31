@@ -32,6 +32,8 @@ public class Object {
     public native void wait(long millis) throws InterruptedException;
 
     public void wait(long millis, int nanos) throws InterruptedException {
+        if (millis < 0 || nanos < 0 || nanos > 999999) throw new IllegalArgumentException();
+        if (nanos > 0 && millis < Long.MAX_VALUE) millis++;
         wait(millis);
     }
 

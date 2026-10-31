@@ -338,7 +338,26 @@ public final class Class<T> implements java.lang.reflect.Type, java.lang.reflect
     }
 
     public java.io.InputStream getResourceAsStream(String name) {
-        return null;
+        String resolved = resolveResourceName(name);
+        ClassLoader loader = getClassLoader();
+        return loader == null ? ClassLoader.getSystemResourceAsStream(resolved)
+                : loader.getResourceAsStream(resolved);
+    }
+
+    public java.net.URL getResource(String name) {
+        String resolved = resolveResourceName(name);
+        ClassLoader loader = getClassLoader();
+        return loader == null ? ClassLoader.getSystemResource(resolved)
+                : loader.getResource(resolved);
+    }
+
+    private String resolveResourceName(String name) {
+        if (name.startsWith("/")) return name.substring(1);
+        Class<?> type = this;
+        while (type.isArray()) type = type.getComponentType();
+        String className = type.getName();
+        int dot = className.lastIndexOf('.');
+        return dot < 0 ? name : className.substring(0, dot).replace('.', '/') + "/" + name;
     }
 
     public String toString() {

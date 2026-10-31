@@ -72,6 +72,12 @@ void kuart_register_component_meta_data(const char* component_name,
                                        const char* const* values,
                                        int count);
 
+// Types preserve scalar values and the android:resource flag (bit 8).
+void kuart_register_component_meta_data_typed(const char* component_name,
+                                             const char* const* keys,
+                                             const char* const* values,
+                                             const int* types, int count);
+
 // Register the package name and the activity list, for PackageManager queries that
 // name the running package.
 void kuart_register_package(const char* package_name,

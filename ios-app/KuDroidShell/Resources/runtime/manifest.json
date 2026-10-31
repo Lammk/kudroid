@@ -1,0 +1,12 @@
+{
+  "flutter_version": "3.32.5",
+  "flutter_revision": "fcf2c11572af6f390246c056bc905eca609533a0",
+  "dart_revision": "05589740efb305ceef593b3db6cab2910c17d480",
+  "original_build_id": "fb5eaead4cf4256da528a8ebbd653cdf89ec99bc",
+  "candidate_build_id": "d512a1385f6d73f28f618369888b65cef4fe6629",
+  "candidate_sha256": "df2715a416aac8dbcd63d81bc2171246af378e8dd9a92d2ece2f0b4489f6e3f1",
+  "snapshot_hash": "830f4f59e7969c70b595182826435c19",
+  "snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+  "target": "android-arm64-release",
+  "patch": "scripts/flutter-runtime/dart-constrained-reservations.patch"
+}

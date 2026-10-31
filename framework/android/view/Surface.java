@@ -21,6 +21,9 @@ public class Surface {
     private boolean mValid = true;
     private int mWidth;
     private int mHeight;
+    private boolean mOwnsNativeObject;
+    private static native long nativeSetFrame(long handle, int x, int y, int width, int height);
+    private static native void nativeRelease(long handle);
 
     public Surface() {
         this.mValid = true;
@@ -46,6 +49,7 @@ public class Surface {
     }
 
     public void release() {
+        clearSurface();
         mValid = false;
         mWidth = 0;
         mHeight = 0;
@@ -53,12 +57,25 @@ public class Surface {
     }
 
     void setSurfaceSize(int width, int height) {
+        setSurfaceFrame(0, 0, width, height);
+    }
+
+    void setSurfaceFrame(int x, int y, int width, int height) {
         mWidth = Math.max(0, width);
         mHeight = Math.max(0, height);
         mValid = true;
+        if (mSurfaceTextureId == 0 && mWidth > 0 && mHeight > 0) {
+            boolean create = mNativeObject == 0;
+            mNativeObject = nativeSetFrame(mNativeObject, x, y, mWidth, mHeight);
+            if (create) mOwnsNativeObject = mNativeObject != 0;
+        }
     }
 
     void clearSurface() {
+        long handle = mNativeObject;
+        mNativeObject = 0;
+        if (handle != 0 && mOwnsNativeObject) nativeRelease(handle);
+        mOwnsNativeObject = false;
         mValid = false;
         mWidth = 0;
         mHeight = 0;

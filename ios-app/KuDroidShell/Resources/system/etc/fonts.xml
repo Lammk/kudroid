@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<familyset version="21">
+    <family name="sans-serif">
+        <font weight="400" style="normal">NotoSans.ttf</font>
+    </family>
+    <alias name="Roboto" to="sans-serif"/>
+    <alias name="sans" to="sans-serif"/>
+</familyset>

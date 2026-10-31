@@ -23,11 +23,12 @@ public final class Bitmap {
     // Bulk pixel work runs natively: a per-pixel Java loop costs hundreds of interpreted
     // instructions per pixel, which makes a text-sized bitmap take hundreds of milliseconds.
     private static native void nativeCopyPixels(int[] src, int config, byte[] dst, int dstOffset);
+    private static native void nativeReadPixels(int[] dst, int config, byte[] src, int srcOffset);
     private static native void nativeFill(int[] pixels, int color);
     private static native void nativeFillRect(int[] pixels, int stride, int left, int top, int right,
                                               int bottom, int color);
 
-    /** Reused by copies into direct buffers; the heap has no collector. */
+    /** Shared staging buffer for copies without accessible byte arrays. */
     private static byte[] sCopyScratch = new byte[0];
 
     private int configCode() {
@@ -236,6 +237,49 @@ public final class Bitmap {
         nativeFill(mPixels, color);
     }
 
+    public void copyPixelsFromBuffer(java.nio.Buffer source) {
+        if (mPixels == null) throw new IllegalStateException("Bitmap is recycled");
+        if (source == null) throw new NullPointerException("source");
+        final int shift;
+        if (source instanceof java.nio.ByteBuffer) shift = 0;
+        else if (source instanceof java.nio.ShortBuffer) shift = 1;
+        else if (source instanceof java.nio.IntBuffer) shift = 2;
+        else throw new RuntimeException("Unsupported buffer type");
+        final int count = getByteCount();
+        if (((long) source.remaining() << shift) < count) {
+            throw new RuntimeException("Buffer is too small");
+        }
+        if (mApiConfig == Config.RGBA_F16 || mApiConfig == Config.HARDWARE) {
+            throw new IllegalStateException("Unsupported bitmap configuration");
+        }
+        final int position = source.position();
+        if (shift == 0 && ((java.nio.ByteBuffer) source).hasArray()) {
+            java.nio.ByteBuffer bytes = (java.nio.ByteBuffer) source;
+            nativeReadPixels(mPixels, configCode(), bytes.array(), bytes.arrayOffset() + position);
+        } else {
+            synchronized (Bitmap.class) {
+                if (sCopyScratch.length < count) sCopyScratch = new byte[count];
+                if (shift == 0) {
+                    try { ((java.nio.ByteBuffer) source).get(sCopyScratch, 0, count); }
+                    finally { source.position(position); }
+                } else {
+                    final int mask = (1 << shift) - 1;
+                    int packed = 0;
+                    for (int i = 0; i < count; i++) {
+                        if ((i & mask) == 0) {
+                            int index = position + (i >> shift);
+                            packed = shift == 1 ? ((java.nio.ShortBuffer) source).get(index) & 65535 :
+                                                  ((java.nio.IntBuffer) source).get(index);
+                        }
+                        sCopyScratch[i] = (byte) (packed >>> ((i & mask) * 8));
+                    }
+                }
+                nativeReadPixels(mPixels, configCode(), sCopyScratch, 0);
+            }
+        }
+        source.position(position + (count >> shift));
+    }
+
     public void copyPixelsToBuffer(java.nio.Buffer destination) {
         if (mPixels == null) throw new IllegalStateException("Bitmap is recycled");
         final int shift;
@@ -257,9 +301,11 @@ public final class Bitmap {
                         bytes.arrayOffset() + bytes.position());
                 bytes.position(bytes.position() + count);
             } else {
-                if (sCopyScratch.length < count) sCopyScratch = new byte[count];
-                nativeCopyPixels(mPixels, configCode(), sCopyScratch, 0);
-                bytes.put(sCopyScratch, 0, count);
+                synchronized (Bitmap.class) {
+                    if (sCopyScratch.length < count) sCopyScratch = new byte[count];
+                    nativeCopyPixels(mPixels, configCode(), sCopyScratch, 0);
+                    bytes.put(sCopyScratch, 0, count);
+                }
             }
             return;
         }
@@ -267,9 +313,9 @@ public final class Bitmap {
         int packed = 0, used = 0;
         for (int pixel : mPixels) {
             int a = pixel >>> 24;
-            int r = ((pixel >>> 16) & 255) * a / 255;
-            int g = ((pixel >>> 8) & 255) * a / 255;
-            int b = (pixel & 255) * a / 255;
+            int r = (((pixel >>> 16) & 255) * a + 127) / 255;
+            int g = (((pixel >>> 8) & 255) * a + 127) / 255;
+            int b = ((pixel & 255) * a + 127) / 255;
             int value = r | (g << 8) | (b << 16) | (a << 24);
             if (mApiConfig == Config.ALPHA_8) value = a;
             else if (mApiConfig == Config.RGB_565) {

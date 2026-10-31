@@ -32,8 +32,8 @@ size_t kudroid_tls_module_offset(void);
 namespace kudroid {
 
 // Resolve an android/bionic symbol to a compatible ios/posix implementation.
-// Unknown symbols return a non-null stub and emit a warning.
-void* resolve_bionic_symbol(const char* name);
+// Optional lookups leave missing symbols null; ordinary lookups warn and return a stub.
+void* resolve_bionic_symbol(const char* name, bool allowDummy = true);
 
 // True when `address` is the universal dummy — the stub every unresolved symbol is
 // bound to, which takes no arguments and returns 0.

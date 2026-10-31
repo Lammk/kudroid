@@ -106,6 +106,7 @@ public class ActivityManager {
         public int importance;
         public int lru;
         public int importanceReasonCode;
+        public int lastTrimLevel;
 
         public RunningAppProcessInfo() {
             importance = IMPORTANCE_FOREGROUND;
@@ -132,6 +133,57 @@ public class ActivityManager {
         public int describeContents() { return 0; }
         public void writeToParcel(android.os.Parcel dest, int flags) {}
     }
+
+    public static class ProcessErrorStateInfo implements android.os.Parcelable {
+        public static final int NO_ERROR = 0;
+        public static final int CRASHED = 1;
+        public static final int NOT_RESPONDING = 2;
+        public int condition;
+        public String processName;
+        public int pid;
+        public int uid;
+        public String tag;
+        public String shortMsg;
+        public String longMsg;
+        public String stackTrace;
+        public byte[] crashData;
+
+        public ProcessErrorStateInfo() {}
+        public ProcessErrorStateInfo(android.os.Parcel source) { readFromParcel(source); }
+
+        public void readFromParcel(android.os.Parcel source) {
+            condition = source.readInt();
+            processName = source.readString();
+            pid = source.readInt();
+            uid = source.readInt();
+            tag = source.readString();
+            shortMsg = source.readString();
+            longMsg = source.readString();
+            stackTrace = source.readString();
+        }
+
+        public int describeContents() { return 0; }
+        public void writeToParcel(android.os.Parcel dest, int flags) {
+            dest.writeInt(condition);
+            dest.writeString(processName);
+            dest.writeInt(pid);
+            dest.writeInt(uid);
+            dest.writeString(tag);
+            dest.writeString(shortMsg);
+            dest.writeString(longMsg);
+            dest.writeString(stackTrace);
+        }
+
+        public static final android.os.Parcelable.Creator<ProcessErrorStateInfo> CREATOR =
+                new android.os.Parcelable.Creator<ProcessErrorStateInfo>() {
+            public ProcessErrorStateInfo createFromParcel(android.os.Parcel source) {
+                return new ProcessErrorStateInfo(source);
+            }
+            public ProcessErrorStateInfo[] newArray(int size) { return new ProcessErrorStateInfo[size]; }
+        };
+    }
+
+    public List<ProcessErrorStateInfo> getProcessesInErrorState() { return null; }
 
     public static class RunningTaskInfo implements android.os.Parcelable {
         public int id;
@@ -177,14 +229,22 @@ public class ActivityManager {
 
     public int getLauncherLargeIconSize() { return 96; }
 
+    public static void getMyMemoryState(RunningAppProcessInfo outState) {
+        if (outState == null) throw new NullPointerException("outState");
+        outState.pid = android.os.Process.myPid();
+        outState.uid = android.os.Process.myUid();
+        outState.importance = RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+        outState.lastTrimLevel = 0;
+        outState.lru = 0;
+        outState.importanceReasonCode = 0;
+    }
+
     public List<RunningAppProcessInfo> getRunningAppProcesses() {
         final List<RunningAppProcessInfo> out = new ArrayList<RunningAppProcessInfo>();
         final RunningAppProcessInfo self = new RunningAppProcessInfo();
+        getMyMemoryState(self);
         self.processName = ActivityThread.getPackageName();
-        self.pid = android.os.Process.myPid();
-        self.uid = android.os.Process.myUid();
         self.pkgList = new String[] { self.processName };
-        self.importance = RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
         out.add(self);
         return out;
     }

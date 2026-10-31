@@ -7,6 +7,7 @@ public class Throwable {
 
     private String message;
     private Throwable cause;
+    private boolean causeInitialized;
     // long[] of (method, pc) pairs recorded by the VM; null when none was recorded.
     private transient Object backtrace;
     // Materialised from backtrace on first use.
@@ -29,11 +30,13 @@ public class Throwable {
     public Throwable(String message, Throwable cause) {
         this.message = message;
         this.cause = cause;
+        this.causeInitialized = true;
         fillInStackTrace();
     }
 
     public Throwable(Throwable cause) {
         this.cause = cause;
+        this.causeInitialized = true;
         this.message = cause == null ? null : cause.toString();
         fillInStackTrace();
     }
@@ -42,6 +45,7 @@ public class Throwable {
             boolean writableStackTrace) {
         this.message = message;
         this.cause = cause;
+        this.causeInitialized = true;
         this.suppressionDisabled = !enableSuppression;
         if (writableStackTrace) {
             fillInStackTrace();
@@ -58,12 +62,15 @@ public class Throwable {
         return getMessage();
     }
 
-    public Throwable getCause() {
+    public synchronized Throwable getCause() {
         return cause;
     }
 
-    public Throwable initCause(Throwable cause) {
+    public synchronized Throwable initCause(Throwable cause) {
+        if (causeInitialized) throw new IllegalStateException("Cause already initialized");
+        if (cause == this) throw new IllegalArgumentException("Self-causation not permitted");
         this.cause = cause;
+        this.causeInitialized = true;
         return this;
     }
 
@@ -135,7 +142,7 @@ public class Throwable {
         java.util.ArrayList<Throwable> seen = new java.util.ArrayList<Throwable>();
         StackTraceElement[] enclosing = null;
         String caption = "";
-        for (Throwable t = this; t != null; t = t.cause) {
+        for (Throwable t = this; t != null; t = t.getCause()) {
             boolean circular = false;
             for (int i = 0; i < seen.size(); i++) {
                 if (seen.get(i) == t) circular = true;

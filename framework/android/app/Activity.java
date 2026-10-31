@@ -179,6 +179,11 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     }
 
+    final void dispatchActivityResult(int requestCode, int resultCode, Intent data) {
+        mFragments.noteStateNotSaved();
+        onActivityResult(requestCode, resultCode, data);
+    }
+
     /**
      * called when a new intent is delivered.
      */
@@ -323,14 +328,18 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     private boolean mFinishing;
     private boolean mDestroyed;
     private boolean mChangingConfigurations;
+    private int mResultCode = RESULT_CANCELED;
+    private Intent mResultData;
 
     /**
      * end of operation.
      */
     public void finish() {
-        if (mFinishing) return;
-        mFinishing = true;
-        ActivityThread.finishActivity(this);
+        synchronized (this) {
+            if (mFinishing) return;
+            mFinishing = true;
+            ActivityThread.finishActivity(this, mResultCode, mResultData);
+        }
     }
 
     public void finishAfterTransition() {
@@ -665,13 +674,17 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     /**
      * sets the result of this operation.
      */
-    public void setResult(int resultCode) {
+    public synchronized void setResult(int resultCode) {
+        mResultCode = resultCode;
+        mResultData = null;
     }
 
     /**
      * sets the result of this operation with data.
      */
-    public void setResult(int resultCode, Intent data) {
+    public synchronized void setResult(int resultCode, Intent data) {
+        mResultCode = resultCode;
+        mResultData = data;
     }
 
     /**
@@ -778,10 +791,18 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
 
     @Override
     public void startActivity(Intent intent, android.os.Bundle options) {
-        if (intent == null) return;
+        startActivityForResult(intent, -1, options);
+    }
+
+    public void startActivityForResult(Intent intent, int requestCode) {
+        startActivityForResult(intent, requestCode, null);
+    }
+
+    public void startActivityForResult(Intent intent, int requestCode, Bundle options) {
+        if (intent == null) throw new NullPointerException();
         ActivityThread at = ActivityThread.currentActivityThread();
         if (at != null) {
-            at.handleStartActivity(this, intent);
+            at.handleStartActivity(this, intent, requestCode);
         }
     }
 

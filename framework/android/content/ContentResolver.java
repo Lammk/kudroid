@@ -7,6 +7,7 @@ package android.content;
  *this is a simulation that returns null/default.
  */
 public class ContentResolver {
+    public static final String SCHEME_CONTENT = "content";
     private final Context mContext;
 
     /**
@@ -26,6 +27,30 @@ public class ContentResolver {
 
     public ContentResolver(Context context) {
         mContext = context;
+    }
+
+    public final ContentProviderClient acquireContentProviderClient(android.net.Uri uri) {
+        if (uri == null) throw new NullPointerException("uri");
+        if (!SCHEME_CONTENT.equals(uri.getScheme()) || uri.getAuthority() == null) return null;
+        return acquireContentProviderClient(uri.getAuthority());
+    }
+
+    public final ContentProviderClient acquireContentProviderClient(String name) {
+        if (name == null) throw new NullPointerException("name");
+        // No content provider is registered.
+        return null;
+    }
+
+    public final ContentProviderClient acquireUnstableContentProviderClient(android.net.Uri uri) {
+        if (uri == null) throw new NullPointerException("uri");
+        if (!SCHEME_CONTENT.equals(uri.getScheme()) || uri.getAuthority() == null) return null;
+        return acquireUnstableContentProviderClient(uri.getAuthority());
+    }
+
+    public final ContentProviderClient acquireUnstableContentProviderClient(String name) {
+        if (name == null) throw new NullPointerException("name");
+        // No content provider is registered.
+        return null;
     }
 
     // Observers, kept so registration succeeds and unregistration is symmetric.

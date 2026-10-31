@@ -49,6 +49,8 @@ public class Intent implements android.os.Parcelable, Cloneable {
         mClassName = o.mClassName;
         mComponent = o.mComponent;
         mData = o.mData;
+        mType = o.mType;
+        mCategories.addAll(o.mCategories);
         mFlags = o.mFlags;
         if (o.mExtras != null) {
             mExtras = new Bundle(o.mExtras);

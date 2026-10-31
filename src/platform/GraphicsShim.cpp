@@ -17,6 +17,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -147,6 +148,12 @@ static void* get_or_create_fallback_metal_layer() {
 #endif
 
 // Standard ANativeWindow structure for KuDroid
+struct SurfaceFrame {
+    std::mutex mutex;
+    int x = 0, y = 0, width = 0, height = 0;
+    std::atomic<bool> active{true};
+};
+
 struct KuDroidNativeWindow {
     uint32_t magic;
     void* layer;
@@ -157,6 +164,7 @@ struct KuDroidNativeWindow {
     // Non-zero when the Surface wraps a SurfaceTexture: frames a codec "renders" into this
     // window are announced to that texture's listener instead of reaching the screen.
     int32_t surfaceTextureId;
+    std::shared_ptr<SurfaceFrame> frame;
 
     KuDroidNativeWindow()
         : magic(0x4B554457), layer(nullptr), width(1080), height(1920), format(1), refCount(1),
@@ -177,6 +185,8 @@ static KuDroidNativeWindow g_nativeWindowInstance;
 // itself renders perfectly happily, with nothing in any log to say so.
 static std::mutex g_nativeWindowsMutex;
 static std::vector<KuDroidNativeWindow*> g_nativeWindows;
+static void sync_surface_frame(void* key, const std::shared_ptr<SurfaceFrame>& frame);
+static void drop_surface_layers(std::shared_ptr<SurfaceFrame> frame);
 
 static void register_native_window(KuDroidNativeWindow* nw) {
     if (!nw) return;
@@ -195,6 +205,30 @@ static void unregister_native_window(KuDroidNativeWindow* nw) {
             return;
         }
     }
+}
+
+extern "C" int64_t kudroid_surface_set_frame(int64_t handle, int x, int y, int width, int height) {
+    if (width <= 0 || height <= 0) return handle;
+    auto* nw = reinterpret_cast<KuDroidNativeWindow*>(handle);
+    if (!nw) {
+        nw = new KuDroidNativeWindow();
+        nw->frame = std::make_shared<SurfaceFrame>();
+        nw->layer = g_metalLayer;
+        register_native_window(nw);
+    }
+    if (nw->magic != 0x4B554457 || !nw->frame) return handle;
+    {
+        std::lock_guard<std::mutex> lock(nw->frame->mutex);
+        if (nw->frame->x == x && nw->frame->y == y &&
+            nw->frame->width == width && nw->frame->height == height) return reinterpret_cast<int64_t>(nw);
+        const bool followsFrame = nw->frame->width == 0 ||
+            (nw->width == nw->frame->width && nw->height == nw->frame->height);
+        nw->frame->x = x; nw->frame->y = y;
+        nw->frame->width = width; nw->frame->height = height;
+        if (followsFrame) { nw->width = width; nw->height = height; }
+    }
+    sync_surface_frame(nw->frame.get(), nw->frame);
+    return reinterpret_cast<int64_t>(nw);
 }
 
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_obj) {
@@ -226,8 +260,10 @@ extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_o
                     if (nw->magic == 0x4B554457) {
                         nw->surfaceTextureId = textureId;
                         nw->layer = layer;
-                        nw->width = width;
-                        nw->height = height;
+                        if (!nw->frame) {
+                            nw->width = width;
+                            nw->height = height;
+                        }
                         nw->refCount.fetch_add(1);
                         register_native_window(nw);
                         gpuLog("ANativeWindow_fromSurface reused %p (layer=%p, size=%dx%d)",
@@ -284,8 +320,10 @@ extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int he
         gpuLog("rebind window %p: layer %p -> %p (size %dx%d -> %dx%d)",
                (void*)nw, nw->layer, layer, nw->width, nw->height, width, height);
         nw->layer = layer;
-        if (width > 0) nw->width = width;
-        if (height > 0) nw->height = height;
+        if (!nw->frame) {
+            if (width > 0) nw->width = width;
+            if (height > 0) nw->height = height;
+        }
     }
 }
 
@@ -299,6 +337,7 @@ extern "C" void kudroid_gpu_resize_native_windows(void* layer, int oldW, int old
     std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
     for (KuDroidNativeWindow* nw : g_nativeWindows) {
         if (!nw || nw->magic != 0x4B554457) continue;
+        if (nw->frame) continue;
         if (nw->layer != layer) continue;
         if (nw->width != oldW || nw->height != oldH) continue;  // guest-owned
         gpuLog("resize window %p on layer %p: size %dx%d -> %dx%d", (void*)nw,
@@ -321,7 +360,11 @@ extern "C" void* kudroid_gpu_native_window_layer(void* window) {
 extern "C" int bionic_ANativeWindow_getWidth(void* window) {
     if (window) {
         auto* nw = static_cast<KuDroidNativeWindow*>(window);
-        if (nw->magic == 0x4B554457) return nw->width > 0 ? nw->width : 1080;
+        if (nw->magic == 0x4B554457) {
+            std::unique_lock<std::mutex> lock;
+            if (nw->frame) lock = std::unique_lock<std::mutex>(nw->frame->mutex);
+            return nw->width > 0 ? nw->width : 1080;
+        }
     }
     return g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
 }
@@ -329,7 +372,11 @@ extern "C" int bionic_ANativeWindow_getWidth(void* window) {
 extern "C" int bionic_ANativeWindow_getHeight(void* window) {
     if (window) {
         auto* nw = static_cast<KuDroidNativeWindow*>(window);
-        if (nw->magic == 0x4B554457) return nw->height > 0 ? nw->height : 1920;
+        if (nw->magic == 0x4B554457) {
+            std::unique_lock<std::mutex> lock;
+            if (nw->frame) lock = std::unique_lock<std::mutex>(nw->frame->mutex);
+            return nw->height > 0 ? nw->height : 1920;
+        }
     }
     return g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
 }
@@ -337,7 +384,11 @@ extern "C" int bionic_ANativeWindow_getHeight(void* window) {
 extern "C" int bionic_ANativeWindow_getFormat(void* window) {
     if (window) {
         auto* nw = static_cast<KuDroidNativeWindow*>(window);
-        if (nw->magic == 0x4B554457) return nw->format;
+        if (nw->magic == 0x4B554457) {
+            std::unique_lock<std::mutex> lock;
+            if (nw->frame) lock = std::unique_lock<std::mutex>(nw->frame->mutex);
+            return nw->format;
+        }
     }
     return 1; // WINDOW_FORMAT_RGBA_8888
 }
@@ -346,6 +397,8 @@ extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, 
     if (window) {
         auto* nw = static_cast<KuDroidNativeWindow*>(window);
         if (nw->magic == 0x4B554457) {
+            std::unique_lock<std::mutex> lock;
+            if (nw->frame) lock = std::unique_lock<std::mutex>(nw->frame->mutex);
             if (width > 0) nw->width = width;
             if (height > 0) nw->height = height;
             if (format > 0) nw->format = format;
@@ -369,6 +422,10 @@ extern "C" void bionic_ANativeWindow_release(void* window) {
             // Drop it from the rebind registry BEFORE freeing: a later
             // kudroid_set_metal_layer would otherwise walk into freed memory.
             unregister_native_window(nw);
+            if (nw->frame) {
+                nw->frame->active.store(false);
+                drop_surface_layers(nw->frame);
+            }
             delete nw;
             return;
         }
@@ -449,6 +506,8 @@ SurfaceLayer g_surfaceLayers[kSurfaceLayers];
 std::mutex g_surfaceLayersMtx;
 void* s_vulkanLayer = nullptr;
 std::unordered_map<void*, void*> g_eglLayers;
+std::unordered_map<void*, void*> g_eglKeys;
+std::unordered_map<void*, void*> g_renderHosts;
 // Host layer -> the sublayer GL presents into (see gl_layer_for_host).
 using RenderLayers = std::unordered_map<void*, void*>;
 RenderLayers g_glLayers;
@@ -456,6 +515,10 @@ RenderLayers g_vulkanLayers;
 
 bool hardware_owns_layer(void* layer) {
     if (s_vulkanLayer && s_vulkanLayer == layer) return true;
+    for (const auto& surface : g_surfaceLayers) {
+        auto host = g_renderHosts.find(surface.layer);
+        if (surface.surface && host != g_renderHosts.end() && host->second == layer) return true;
+    }
     const auto vkHost = g_vulkanLayers.find(layer);
     if (vkHost != g_vulkanLayers.end()) {
         for (const auto& surface : g_surfaceLayers) {
@@ -474,10 +537,11 @@ extern "C" bool kudroid_gpu_canvas_allowed(void* layer) {
     return !hardware_owns_layer(layer);
 }
 
-static void register_egl_layer(void* surface, void* layer) {
+static void register_egl_layer(void* surface, void* layer, void* key = nullptr) {
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
         g_eglLayers[surface] = layer;
+        g_eglKeys[surface] = key ? key : layer;
     }
 #if defined(__APPLE__)
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -498,9 +562,10 @@ static void unregister_egl_layer(void* surface) {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
         auto it = g_eglLayers.find(surface);
         if (it == g_eglLayers.end()) return;
-        host = it->second;
+        host = g_eglKeys[surface];
         g_eglLayers.erase(it);
-        for (const auto& entry : g_eglLayers) {
+        g_eglKeys.erase(surface);
+        for (const auto& entry : g_eglKeys) {
             if (entry.second == host) { hostStillHasGl = true; break; }
         }
     }
@@ -514,6 +579,7 @@ static void unregister_egl_layer(void* surface) {
 #include <objc/message.h>
 
 // Each renderer presents into a child CAMetalLayer, separate from the UI backing store.
+static std::unordered_map<void*, std::shared_ptr<SurfaceFrame>> g_layerFrames;
 
 // Main thread only. Fits |child| to |host|: same bounds, host scale, matching drawable.
 static void render_layer_sync_geometry(id child, id host, int w, int h, float density) {
@@ -537,6 +603,18 @@ static void render_layer_sync_geometry(id child, id host, int w, int h, float de
     const CGRect hostBounds = getRect(host, sel_registerName("bounds"));
     double bw = hostBounds.size.width;
     double bh = hostBounds.size.height;
+    double bx = 0.0, by = 0.0;
+    std::shared_ptr<SurfaceFrame> frame;
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        auto it = g_layerFrames.find(child);
+        if (it != g_layerFrames.end()) frame = it->second;
+    }
+    if (frame) {
+        std::lock_guard<std::mutex> lock(frame->mutex);
+        bx = frame->x / scale; by = frame->y / scale;
+        bw = frame->width / scale; bh = frame->height / scale;
+    }
     if (bw <= 0.0 || bh <= 0.0) {  // host not laid out yet
         bw = (w > 0 ? w : 1080) / scale;
         bh = (h > 0 ? h : 1920) / scale;
@@ -548,17 +626,19 @@ static void render_layer_sync_geometry(id child, id host, int w, int h, float de
         voidCall(reinterpret_cast<id>(clsTxn), sel_registerName("begin"));
         setBool(reinterpret_cast<id>(clsTxn), sel_registerName("setDisableActions:"), YES);
     }
-    setRect(child, sel_registerName("setFrame:"), CGRectMake(0, 0, bw, bh));
+    setRect(child, sel_registerName("setFrame:"), CGRectMake(bx, by, bw, bh));
     setFloat(child, sel_registerName("setContentsScale:"), scale);
     setSize(child, sel_registerName("setDrawableSize:"), CGSizeMake(bw * scale, bh * scale));
     if (clsTxn) voidCall(reinterpret_cast<id>(clsTxn), sel_registerName("commit"));
 }
 
 // Main thread only.
-static void render_layer_create_on_main(void* hostPtr, RenderLayers* layers, const char* renderer) {
+static void render_layer_create_on_main(void* hostPtr, void* key, RenderLayers* layers,
+        const char* renderer, const std::shared_ptr<SurfaceFrame>& frame) {
+    if (frame && !frame->active.load()) return;
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        if (layers->count(hostPtr)) return;
+        if (layers->count(key)) return;
     }
     Class clsCALayer = objc_getClass("CALayer");
     Class clsMetal = objc_getClass("CAMetalLayer");
@@ -578,30 +658,37 @@ static void render_layer_create_on_main(void* hostPtr, RenderLayers* layers, con
     if (!child) return;
     idRet(child, sel_registerName("retain"));  // balanced in drop_render_layer_for_host
     setBool(child, sel_registerName("setOpaque:"), YES);
+    if (frame) {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        g_layerFrames[child] = frame;
+    }
     render_layer_sync_geometry(child, host, g_metalLayerWidth, g_metalLayerHeight, g_metalLayerDensity);
     setId(host, sel_registerName("addSublayer:"), child);
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        (*layers)[hostPtr] = child;
+        (*layers)[key] = child;
+        g_renderHosts[child] = hostPtr;
     }
     gpuLog("%s layer %p attached under host %p", renderer, (void*)child, hostPtr);
 }
 
 // Create each renderer's child layer on the host UI thread.
-static void* render_layer_for_host(void* host, RenderLayers* layers, const char* renderer) {
+static void* render_layer_for_host(void* host, RenderLayers* layers, const char* renderer,
+        void* key = nullptr, std::shared_ptr<SurfaceFrame> frame = nullptr) {
     if (!host) return nullptr;
-    auto existing = [host, layers]() -> void* {
+    if (!key) key = host;
+    auto existing = [key, layers]() -> void* {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        auto it = layers->find(host);
+        auto it = layers->find(key);
         return it == layers->end() ? nullptr : it->second;
     };
     if (void* child = existing()) return child;
     if (pthread_main_np()) {
-        render_layer_create_on_main(host, layers, renderer);
+        render_layer_create_on_main(host, key, layers, renderer, frame);
     } else {
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_main_queue(), ^{
-            render_layer_create_on_main(host, layers, renderer);
+            render_layer_create_on_main(host, key, layers, renderer, frame);
             dispatch_semaphore_signal(done);
         });
         // Not released on timeout: the block may still signal it.
@@ -623,6 +710,8 @@ static void drop_render_layer_for_host(void* host, RenderLayers* layers) {
         if (it == layers->end()) return;
         child = it->second;
         layers->erase(it);
+        g_layerFrames.erase(child);
+        g_renderHosts.erase(child);
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         typedef void (*VoidFn)(id, SEL);
@@ -641,17 +730,48 @@ static void drop_gl_layer_for_host(void* host) {
     drop_render_layer_for_host(host, &g_glLayers);
 }
 
+static void drop_surface_layers(std::shared_ptr<SurfaceFrame> frame) {
+    auto drop = ^{
+        void* key = frame.get();
+        drop_render_layer_for_host(key, &g_glLayers);
+        drop_render_layer_for_host(key, &g_vulkanLayers);
+    };
+    if (pthread_main_np()) drop();
+    else dispatch_async(dispatch_get_main_queue(), drop);
+}
+
+static void sync_surface_frame(void* key, const std::shared_ptr<SurfaceFrame>& frame) {
+    const auto retainedFrame = frame;
+    auto apply = ^{
+        if (!retainedFrame->active.load()) return;
+        std::vector<void*> children;
+        {
+            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+            for (auto* layers : {&g_glLayers, &g_vulkanLayers}) {
+                auto it = layers->find(key);
+                if (it != layers->end()) children.push_back(it->second);
+            }
+        }
+        for (void* child : children) {
+            render_layer_sync_geometry(reinterpret_cast<id>(child), reinterpret_cast<id>(g_metalLayer),
+                g_metalLayerWidth, g_metalLayerHeight, g_metalLayerDensity);
+        }
+    };
+    if (pthread_main_np()) apply();
+    else dispatch_async(dispatch_get_main_queue(), apply);
+}
+
 // Follows the host through resize/rotation. Called by kudroid_set_metal_layer.
 extern "C" void kudroid_gpu_sync_gl_layers(void* host, int w, int h, float density) {
     if (!host) return;
     auto apply = ^{
-        void* gl = nullptr;
+        std::vector<void*> children;
         {
             std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-            auto it = g_glLayers.find(host);
-            if (it != g_glLayers.end()) gl = it->second;
+            for (const auto& entry : g_glLayers) children.push_back(entry.second);
         }
-        if (gl) render_layer_sync_geometry(reinterpret_cast<id>(gl), reinterpret_cast<id>(host), w, h, density);
+        for (void* gl : children)
+            render_layer_sync_geometry(reinterpret_cast<id>(gl), reinterpret_cast<id>(host), w, h, density);
     };
     if (pthread_main_np()) apply();
     else dispatch_async(dispatch_get_main_queue(), apply);
@@ -665,6 +785,7 @@ static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) {
         {
             std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
             if (s_vulkanLayer != vk_layer) return;
+            g_renderHosts[vk_layer] = hostPtr;
         }
         id layer = reinterpret_cast<id>(vk_layer);
         id host = reinterpret_cast<id>(hostPtr);
@@ -768,6 +889,8 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     });
 }
 #else
+static void sync_surface_frame(void*, const std::shared_ptr<SurfaceFrame>&) {}
+static void drop_surface_layers(std::shared_ptr<SurfaceFrame>) {}
 static void* gl_layer_for_host(void* host) { return host; }
 static void drop_gl_layer_for_host(void* host) { (void)host; }
 extern "C" void kudroid_gpu_sync_gl_layers(void* host, int w, int h, float density) {
@@ -1303,10 +1426,13 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
     }
 
     void* actualLayer = g_metalLayer;
+    void* windowKey = nullptr;
+    std::shared_ptr<SurfaceFrame> windowFrame;
     if (pCreateInfo->window && pCreateInfo->window != (void*)1) {
         auto* nw = static_cast<KuDroidNativeWindow*>(pCreateInfo->window);
         if (nw->magic == 0x4B554457 && nw->layer) {
             actualLayer = nw->layer;
+            if (nw->frame) { windowKey = nw->frame.get(); windowFrame = nw->frame; }
         } else {
             actualLayer = pCreateInfo->window;
         }
@@ -1315,7 +1441,7 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
     if (!actualLayer) {
         actualLayer = get_or_create_fallback_metal_layer();
     }
-    actualLayer = render_layer_for_host(actualLayer, &g_vulkanLayers, "Vulkan");
+    actualLayer = render_layer_for_host(actualLayer, &g_vulkanLayers, "Vulkan", windowKey, windowFrame);
     if (actualLayer == nullptr) return -3;  // VK_ERROR_INITIALIZATION_FAILED
 
 #endif
@@ -1647,6 +1773,7 @@ extern "C" void kudroid_gpu_note_run_end(void) {
         }
         // The run's EGL surfaces are gone; stale entries would keep a layer "owned".
         g_eglLayers.clear();
+        g_eglKeys.clear();
         for (const auto& entry : g_glLayers) glHosts.push_back(entry.first);
         for (const auto& entry : g_vulkanLayers) vkHosts.push_back(entry.first);
     }
@@ -1864,10 +1991,13 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
     auto host_destroy = (PFN_eglDestroySurface)get_egl_func("eglDestroySurface");
     if (host_func) {
         void* resolvedLayer = g_metalLayer;
+        void* windowKey = nullptr;
+        std::shared_ptr<SurfaceFrame> windowFrame;
         if (win) {
             auto* nw = static_cast<KuDroidNativeWindow*>(win);
             if (nw->magic == 0x4B554457 && nw->layer) {
                 resolvedLayer = nw->layer;
+                if (nw->frame) { windowKey = nw->frame.get(); windowFrame = nw->frame; }
             }
         }
 #if defined(__APPLE__)
@@ -1877,7 +2007,15 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
 #endif
         // ANGLE presents into a sublayer of its own; resolvedLayer stays the host
         // that ownership and canvas decisions are keyed on.
-        EGLNativeWindowType nativeWin = (EGLNativeWindowType)gl_layer_for_host(resolvedLayer);
+        auto resolveRenderLayer = [&]() -> void* {
+#if defined(__APPLE__)
+            if (windowFrame) return render_layer_for_host(resolvedLayer, &g_glLayers,
+                "GL", windowKey, windowFrame);
+#endif
+            return gl_layer_for_host(resolvedLayer);
+        };
+        EGLNativeWindowType nativeWin = (EGLNativeWindowType)resolveRenderLayer();
+        if (!nativeWin) return nullptr;
         gpuLog("eglCreateWindowSurface: calling ANGLE with layer=%p (host=%p)...", (void*)nativeWin, resolvedLayer);
 #if defined(__APPLE__)
         void* pool = objc_autoreleasePoolPush();
@@ -1887,13 +2025,13 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
             host_destroy(s_activeEglDisplay ? s_activeEglDisplay : dpy, s_activeEglSurface);
             unregister_egl_layer(s_activeEglSurface);
             s_activeEglSurface = nullptr;
-            nativeWin = (EGLNativeWindowType)gl_layer_for_host(resolvedLayer);  // may have been dropped
+            nativeWin = (EGLNativeWindowType)resolveRenderLayer();
             s = host_func(dpy, config, nativeWin, attrib_list);
         }
         objc_autoreleasePoolPop(pool);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         if (s) {
-            register_egl_layer(s, resolvedLayer);
+            register_egl_layer(s, resolvedLayer, windowKey);
             s_activeEglSurface = s;
             s_activeEglDisplay = dpy;
         }
@@ -1905,12 +2043,12 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
             host_destroy(s_activeEglDisplay ? s_activeEglDisplay : dpy, s_activeEglSurface);
             unregister_egl_layer(s_activeEglSurface);
             s_activeEglSurface = nullptr;
-            nativeWin = (EGLNativeWindowType)gl_layer_for_host(resolvedLayer);
+            nativeWin = (EGLNativeWindowType)resolveRenderLayer();
             s = host_func(dpy, config, nativeWin, attrib_list);
         }
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         if (s) {
-            register_egl_layer(s, resolvedLayer);
+            register_egl_layer(s, resolvedLayer, windowKey);
             s_activeEglSurface = s;
             s_activeEglDisplay = dpy;
         }
@@ -3772,6 +3910,7 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
     {"ANativeWindow_getHeight", reinterpret_cast<void*>(&bionic_ANativeWindow_getHeight)},
+    {"ANativeWindow_getFormat", reinterpret_cast<void*>(&bionic_ANativeWindow_getFormat)},
     {"ANativeWindow_setBuffersGeometry", reinterpret_cast<void*>(&bionic_ANativeWindow_setBuffersGeometry)},
     {"ANativeWindow_release", reinterpret_cast<void*>(&bionic_ANativeWindow_release)},
     {"ANativeWindow_acquire", reinterpret_cast<void*>(&bionic_ANativeWindow_acquire)},
