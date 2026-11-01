@@ -72,6 +72,7 @@ final class IOSDiagnostics: NSObject, MXMetricManagerSubscriber {
         timer.schedule(deadline: .now() + .milliseconds(250), repeating: .seconds(1))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            kudroid_drain_trap_diagnostics()
             self.sequence &+= 1
             let seq = self.sequence
             self.record("ios-watchdog-dispatch seq=\(seq)")

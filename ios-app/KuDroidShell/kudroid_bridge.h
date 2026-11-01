@@ -12,6 +12,8 @@ extern "C" {
 
 void kudroid_set_standalone_root(const char* dir);
 void kudroid_set_log_paths(const char* documents, const char* logs);
+void kudroid_log_vm_startup_probe(void);
+void kudroid_drain_trap_diagnostics(void);
 void kudroid_set_thermal_status(int status);
 int kudroid_debugger_attached(void);
 int kudroid_has_jit_entitlement(void);

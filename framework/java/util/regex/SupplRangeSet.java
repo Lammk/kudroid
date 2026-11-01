@@ -87,7 +87,7 @@ package java.util.regex;
  * This character can be supplementary (2 chars needed to represent) or from 
  * basic multilingual pane (1 needed char to represent it).
  */
-class SupplRangeSet extends JointSet {
+class SupplRangeSet extends CharacterClassSet {
 
     protected AbstractCharClass chars;
 
@@ -104,25 +104,21 @@ class SupplRangeSet extends JointSet {
         this.alt = cc.alt;
     }
 
-    public int matches(int stringIndex, CharSequence testString,
+    int accepts(int stringIndex, CharSequence testString,
             MatchResultImpl matchResult) {
         int strLength = matchResult.getRightBound();
-        int offset = -1;
 
         if (stringIndex < strLength) {            
             char high = testString.charAt(stringIndex++);
             
-            if (contains(high) && 
-                    (offset = next.matches(stringIndex, testString, matchResult)) > 0) {
-                return offset;
-            }
+            if (contains(high)) return 1;
             
             if (stringIndex < strLength) {
                 char low = testString.charAt(stringIndex++);
                 
                 if (Character.isSurrogatePair(high, low) 
                         && contains(Character.toCodePoint(high, low))) {
-                    return next.matches(stringIndex, testString, matchResult);
+                    return 2;
                 }
             }
         }

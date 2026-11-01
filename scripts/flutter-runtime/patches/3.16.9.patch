@@ -1,0 +1,23 @@
+--- a/runtime/vm/virtual_memory_posix.cc
++++ b/runtime/vm/virtual_memory_posix.cc
+@@ -39,7 +39,8 @@
+ #undef MAP_FAILED
+ #define MAP_FAILED reinterpret_cast<void*>(-1)
+
+-#if defined(DART_HOST_OS_IOS)
++#if defined(DART_HOST_OS_IOS) || \
++    (defined(DART_HOST_OS_ANDROID) && defined(TARGET_ARCH_ARM64))
+ #define LARGE_RESERVATIONS_MAY_FAIL
+ #endif
+
+@@ -187,6 +188,10 @@
+   }
+   VirtualMemoryCompressedHeap::Init(compressed_heap_->address(),
+                                     compressed_heap_->size());
++#if defined(DART_HOST_OS_ANDROID) && defined(TARGET_ARCH_ARM64)
++  OS::PrintErr("[KuDroidFlutterVM] compressed heap base=%p size=%" Pd "\n",
++               compressed_heap_->address(), compressed_heap_->size());
++#endif
+ #endif  // defined(DART_COMPRESSED_POINTERS)
+
+ #if defined(DUAL_MAPPING_SUPPORTED)

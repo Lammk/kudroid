@@ -1,0 +1,99 @@
+[
+  {
+    "flutter_tag": "3.32.5",
+    "flutter_revision": "fcf2c11572af6f390246c056bc905eca609533a0",
+    "engine_revision": "fcf2c11572af6f390246c056bc905eca609533a0",
+    "dart_revision": "05589740efb305ceef593b3db6cab2910c17d480",
+    "dart_version": "3.8.1",
+    "layout": "merged",
+    "no_rbe": true,
+    "patch": "dart-constrained-reservations.patch",
+    "reference_build_id": "fb5eaead4cf4256da528a8ebbd653cdf89ec99bc",
+    "reference_sha256": "cbcd613d19791a34dc7886ce0cc3504e787fbcd8bf9bfea8d4c55f3bcba9ede1",
+    "vm_snapshot_hash": "830f4f59e7969c70b595182826435c19",
+    "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+    "isolate_snapshot_hash": "830f4f59e7969c70b595182826435c19",
+    "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+    "dart_path": "engine/src/flutter/third_party/dart"
+  },
+  {
+    "flutter_tag": "3.24.5",
+    "flutter_revision": "dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668",
+    "engine_revision": "a18df97ca57a249df5d8d68cd0820600223ce262",
+    "dart_revision": "88c9758ef131d430d8ce595c6bfb4c90574d3ddd",
+    "dart_version": "3.5.4",
+    "layout": "standalone",
+    "no_rbe": true,
+    "patch": "patches/3.24.5.patch",
+    "reference_build_id": "67d6564b8d334123ab2f76cbe8615dc2688a7cf8",
+    "reference_sha256": "0baa710d6b7f7de2f8bcc05aa2950bab2989f3a4c95bc7f7bcc23ce84626ee52",
+    "vm_snapshot_hash": "80a49c7111088100a233b2ae788e1f48",
+    "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+    "isolate_snapshot_hash": "80a49c7111088100a233b2ae788e1f48",
+    "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+    "dart_path": "src/flutter/third_party/dart",
+    "dependency_mirrors": {
+      "src/flutter/third_party/tinygltf": "https://github.com/syoyo/tinygltf.git@9bb5806df4055ac973b970ba5b3e27ce27d98148"
+    }
+  },
+  {
+    "flutter_tag": "3.22.2",
+    "flutter_revision": "761747bfc538b5af34aa0d3fac380f1bc331ec49",
+    "engine_revision": "edd8546116457bdf1c5bdfb13ecb9463d2bb5ed4",
+    "dart_revision": "1a849f91804e73a830844a5bf546a3f7027fc36d",
+    "dart_version": "3.4.3",
+    "layout": "standalone",
+    "no_rbe": true,
+    "patch": "patches/3.22.2.patch",
+    "reference_build_id": "e05edcf1368609668cf1873a167462cbcf923136",
+    "reference_sha256": "b1330995b830364dfbcc37b8c0b54d8820b327bfa96980c5d80b6b1aa23dd677",
+    "vm_snapshot_hash": "d20a1be77c3d3c41b2a5accaee1ce549",
+    "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+    "isolate_snapshot_hash": "d20a1be77c3d3c41b2a5accaee1ce549",
+    "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+    "dart_path": "src/third_party/dart",
+    "dependency_mirrors": {
+      "src/flutter/third_party/tinygltf": "https://github.com/syoyo/tinygltf.git@9bb5806df4055ac973b970ba5b3e27ce27d98148"
+    }
+  },
+  {
+    "flutter_tag": "3.16.9",
+    "flutter_revision": "41456452f29d64e8deb623a3c927524bcf9f111b",
+    "engine_revision": "f40e976bedff57e69e1b3d89a7c2a3c617a03dad",
+    "dart_revision": "3b128c5454834a1aaef37d9bb12595e7c217ab61",
+    "dart_version": "3.2.6",
+    "layout": "standalone",
+    "no_rbe": true,
+    "patch": "patches/3.16.9.patch",
+    "reference_build_id": "906784233a7115d633b9295589a1b16a2329b46a",
+    "reference_sha256": "e0938d7b69ddd2af1f2f31d85d1dc3188b4ecc73391f8c7b81f22a62b1c8c4b6",
+    "vm_snapshot_hash": "f71c76320d35b65f1164dbaa6d95fe09",
+    "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+    "isolate_snapshot_hash": "f71c76320d35b65f1164dbaa6d95fe09",
+    "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+    "dart_path": "src/third_party/dart",
+    "dependency_mirrors": {
+      "src/third_party/perfetto": "https://github.com/google/perfetto.git@b8da07095979310818f0efde2ef3c69ea70d62c5"
+    }
+  },
+  {
+    "flutter_tag": "3.10.6",
+    "flutter_revision": "f468f3366c26a5092eb964a230ce7892fda8f2f8",
+    "engine_revision": "cdbeda788a293fa29665dc3fa3d6e63bd221cb0d",
+    "dart_revision": "8d5b878d0a8a06326227cde88221eea7e15ee0c4",
+    "dart_version": "3.0.6",
+    "layout": "standalone",
+    "no_rbe": false,
+    "patch": "patches/3.10.6.patch",
+    "reference_build_id": "a46086475ee4ec71de8ddd4e5cab30189bf0e0e1",
+    "reference_sha256": "8e6c447139ad961c474be97f61d22eb33c6ebb316feb5646ea4506d1e40270e0",
+    "vm_snapshot_hash": "90b56a561f70cd55e972cb49b79b3d8b",
+    "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-asserts arm64 android compressed-pointers null-safety",
+    "isolate_snapshot_hash": "90b56a561f70cd55e972cb49b79b3d8b",
+    "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-asserts arm64 android compressed-pointers null-safety",
+    "dart_path": "src/third_party/dart",
+    "dependency_mirrors": {
+      "src/third_party/perfetto": "https://github.com/google/perfetto.git@b8da07095979310818f0efde2ef3c69ea70d62c5"
+    }
+  }
+]

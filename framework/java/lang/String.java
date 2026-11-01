@@ -354,12 +354,22 @@ public final class String implements CharSequence, Comparable<String> {
     }
 
     public boolean regionMatches(int toffset, String other, int ooffset, int len) {
+        return regionMatches(false, toffset, other, ooffset, len);
+    }
+
+    public boolean regionMatches(boolean ignoreCase, int toffset, String other, int ooffset, int len) {
+        int otherLength = other.length();
         if ((ooffset < 0) || (toffset < 0) || (toffset > (long)length() - len) ||
-            (ooffset > (long)other.length() - len)) {
+            (ooffset > (long)otherLength - len)) {
             return false;
         }
         for (int i = 0; i < len; i++) {
-            if (charAt(toffset + i) != other.charAt(ooffset + i)) return false;
+            char a = charAt(toffset + i), b = other.charAt(ooffset + i);
+            if (a == b) continue;
+            if (!ignoreCase) return false;
+            a = Character.toUpperCase(a);
+            b = Character.toUpperCase(b);
+            if (a != b && Character.toLowerCase(a) != Character.toLowerCase(b)) return false;
         }
         return true;
     }

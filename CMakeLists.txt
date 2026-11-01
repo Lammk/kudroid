@@ -122,10 +122,13 @@ add_library(kudroid_core STATIC
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
     src/ElfPackedRelocations.cpp
+    src/ElfAliasStore.cpp
     src/ExecMemory.cpp
     src/elf_x18.cpp
     src/library_manager.cpp
     src/FlutterRuntime.cpp
+    src/AlignedVmReservations.cpp
+    src/RuntimeCageAdapter.cpp
     src/platform/InputShim.cpp
     src/platform/ArchiveExport.cpp
     src/platform/NativeTouchGate.cpp
@@ -145,6 +148,7 @@ add_library(kudroid_core STATIC
     src/platform/MediaContainer.cpp
     src/platform/MediaDecoder.cpp
     src/platform/GraphicsShim.cpp
+    src/platform/EglCapabilities.cpp
     # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp
     # because it owns a thread and a set of pipes, and nothing else in there does.
     src/platform/FramePacer.cpp
@@ -168,6 +172,8 @@ add_library(kudroid_core STATIC
     src/bridge/ShellUI.cpp
     src/bridge/GuestLibrary.cpp
     src/bridge/AppLifecycle.cpp
+    src/bridge/VirtualMemoryProbe.cpp
+    src/bridge/TrapDiagnostics.cpp
     src/bridge/DiagnosticTests.cpp
     src/kudroid_bridge.cpp
     src/gpu_test.cpp
@@ -188,6 +194,9 @@ add_library(kudroid_core STATIC
     src/kuart/LibNet.cpp
     src/kuart/LibTls.cpp
     src/kuart/LibZip.cpp
+    src/kuart/LibSecurity.cpp
+    src/platform/RsaSignature.cpp
+    src/platform/SymmetricCrypto.cpp
     src/kuart/JitCache.cpp
     src/kuart/JitCompiler.cpp
     # JitCache queries the platform memory policy. Keep this provider after the
@@ -258,6 +267,7 @@ target_include_directories(kudroid_core PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 target_include_directories(kudroid_core SYSTEM PRIVATE third_party/android_headers)
+target_include_directories(kudroid_core PRIVATE third_party/ANGLE/include)
 
 # kudroid_core uses Apple frameworks (AudioQueue -> AudioToolbox,
 # kCFRunLoopCommonModes -> CoreFoundation, NSException/objc runtime ->
@@ -291,7 +301,7 @@ target_compile_options(kudroid_core PRIVATE
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     enable_language(Swift)
     add_custom_target(kudroid_flutter_runtime_check
-        COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flutter-runtime/verify-asset.py"
+        COMMAND timeout 120 python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flutter-runtime/verify-asset.py"
             --asset "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/KuDroidShell/Resources/runtime"
         VERBATIM)
     add_dependencies(kudroid_core kudroid_flutter_runtime_check)
@@ -301,6 +311,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_dependencies(kudroid_core kudroid_system_fonts_check)
     
     # Define the iOS Application Target
+    file(GLOB_RECURSE KUDROID_FLUTTER_RUNTIME_ASSETS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/KuDroidShell/Resources/runtime/*")
+    file(GLOB_RECURSE KUDROID_RUNTIME_ADAPTER_ASSETS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/KuDroidShell/Resources/runtime-adapters/*")
     add_executable(KuDroidShell MACOSX_BUNDLE
         ios-app/KuDroidShell/KuDroidApp.swift
         ios-app/KuDroidShell/ContentView.swift
@@ -317,10 +331,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/NetworkBridge.swift
         ios-app/KuDroidShell/kudroid_bridge.h
         ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
-        ios-app/KuDroidShell/Resources/runtime/libflutter.so
-        ios-app/KuDroidShell/Resources/runtime/manifest.json
-        ios-app/KuDroidShell/Resources/runtime/FLUTTER_LICENSE.txt
-        ios-app/KuDroidShell/Resources/runtime/DART_LICENSE.txt
+        ${KUDROID_FLUTTER_RUNTIME_ASSETS}
+        ${KUDROID_RUNTIME_ADAPTER_ASSETS}
         ios-app/KuDroidShell/Resources/system/etc/fonts.xml
         ios-app/KuDroidShell/Resources/system/fonts/NotoSans.ttf
         ios-app/KuDroidShell/Resources/system/NOTO_LICENSE.txt
@@ -328,12 +340,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 
     set_source_files_properties(icon.png ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
         PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-    set_source_files_properties(
-        ios-app/KuDroidShell/Resources/runtime/libflutter.so
-        ios-app/KuDroidShell/Resources/runtime/manifest.json
-        ios-app/KuDroidShell/Resources/runtime/FLUTTER_LICENSE.txt
-        ios-app/KuDroidShell/Resources/runtime/DART_LICENSE.txt
-        PROPERTIES MACOSX_PACKAGE_LOCATION Resources/runtime HEADER_FILE_ONLY TRUE)
+    foreach(asset IN LISTS KUDROID_FLUTTER_RUNTIME_ASSETS KUDROID_RUNTIME_ADAPTER_ASSETS)
+        file(RELATIVE_PATH relative_asset
+            "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/KuDroidShell/Resources" "${asset}")
+        get_filename_component(asset_directory "${relative_asset}" DIRECTORY)
+        set_source_files_properties("${asset}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/${asset_directory}" HEADER_FILE_ONLY TRUE)
+    endforeach()
     set_source_files_properties(ios-app/KuDroidShell/Resources/system/etc/fonts.xml
         PROPERTIES MACOSX_PACKAGE_LOCATION Resources/system/etc HEADER_FILE_ONLY TRUE)
     set_source_files_properties(ios-app/KuDroidShell/Resources/system/fonts/NotoSans.ttf
@@ -392,6 +405,15 @@ else()
 
 
     # Host-side regression tests for the guest syscall shims (SyscallShim.cpp).
+    add_executable(test_elf_alias_store tests/test_elf_alias_store.cpp src/ElfAliasStore.cpp)
+    add_executable(test_aligned_vm_reservations tests/test_aligned_vm_reservations.cpp src/AlignedVmReservations.cpp)
+    target_include_directories(test_aligned_vm_reservations PRIVATE include)
+    target_link_libraries(test_aligned_vm_reservations PRIVATE pthread)
+    target_include_directories(test_elf_alias_store PRIVATE include)
+    add_executable(test_egl_capabilities tests/test_egl_capabilities.cpp)
+    target_include_directories(test_egl_capabilities PRIVATE third_party/ANGLE/include)
+    target_link_libraries(test_egl_capabilities PRIVATE kudroid_core)
+    target_link_options(test_egl_capabilities PRIVATE -rdynamic)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_elf_relocations.cpp")
         add_executable(test_elf_relocations tests/test_elf_relocations.cpp)
         target_link_libraries(test_elf_relocations PRIVATE kudroid_core)
@@ -621,6 +643,21 @@ else()
     # hardcoded constants written independently of each other, and __sched_cpucount was
     # missing entirely so it bound to the universal dummy and returned 0. These tests pin
     # that every surface answers with the same topology.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mmap_reservation.cpp")
+        add_executable(test_mmap_reservation tests/test_mmap_reservation.cpp)
+        target_link_libraries(test_mmap_reservation PRIVATE kudroid_core)
+        target_include_directories(test_mmap_reservation PRIVATE include)
+    endif()
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(test_trap_diagnostics tests/test_trap_diagnostics.cpp
+            src/bridge/TrapDiagnostics.cpp)
+        target_include_directories(test_trap_diagnostics PRIVATE include src/bridge)
+    endif()
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_package.cpp")
+        add_executable(test_cpu_package tests/test_cpu_package.cpp)
+        target_link_libraries(test_cpu_package PRIVATE kudroid_core)
+        target_include_directories(test_cpu_package PRIVATE include)
+    endif()
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_info.cpp")
         add_executable(test_cpu_info
             tests/test_cpu_info.cpp
@@ -759,6 +796,11 @@ else()
         test_kuart_interp
         test_kuart_object
         test_kuart_jni
+        test_kuart_jni_initialization
+        test_kuart_native_startup
+        test_kuart_native_loader
+        test_kuart_properties
+        test_kuart_dlsym
         test_kuart_exc
         test_kuart_reflect
         test_kuart_libcore
@@ -766,6 +808,8 @@ else()
         test_kuart_jni_float
         test_kuart_stub
         test_kuart_framework
+        test_kuart_concurrent_map
+        test_kuart_regex_classes
         test_kuart_missing_field
         test_kuart_thread_state
         test_kuart_vmlock
@@ -796,6 +840,87 @@ else()
             endif()
         endif()
     endforeach()
+
+    # Execute security and collection regressions through the real framework DEX and JNI.
+    if(Java_FOUND AND KUDROID_D8_JAR AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_kuart_security_collections.cpp")
+        set(KUART_SECURITY_COLLECTIONS_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/RsaTestVectors.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/SecurityStartupTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/SymmetricCryptoTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/LoadingFrameworkTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/StartupFrameworkTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/OrderedCollectionTests.java)
+        set(KUART_SECURITY_COLLECTIONS_DEX "${CMAKE_BINARY_DIR}/kuart_security_collections.dex")
+        add_custom_command(OUTPUT "${KUART_SECURITY_COLLECTIONS_DEX}"
+            COMMAND timeout 120 bash ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh
+                "${KUART_SECURITY_COLLECTIONS_DEX}" ${KUART_SECURITY_COLLECTIONS_SOURCES}
+            DEPENDS ${KUART_SECURITY_COLLECTIONS_SOURCES} kudroid_framework_dex)
+        add_custom_target(kuart_security_collections_dex DEPENDS "${KUART_SECURITY_COLLECTIONS_DEX}")
+        add_executable(test_kuart_security_collections kuart-tests/test_kuart_security_collections.cpp)
+        target_link_libraries(test_kuart_security_collections PRIVATE kudroid_core art_dex)
+        target_include_directories(test_kuart_security_collections PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_security_collections PRIVATE
+            KUART_SECURITY_COLLECTIONS_DEX="${KUART_SECURITY_COLLECTIONS_DEX}")
+        add_dependencies(test_kuart_security_collections kuart_security_collections_dex)
+    endif()
+
+    if(Java_FOUND AND KUDROID_D8_JAR AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_kuart_dynamic_loading.cpp")
+        set(KUART_DYNAMIC_FIXTURES "${CMAKE_BINARY_DIR}/dynamic-fixtures")
+        set(KUART_DYNAMIC_FIXTURE_SOURCES)
+        set(KUART_DYNAMIC_FIXTURE_OUTPUTS)
+        foreach(name Heap Direct View Dependency Caller Rollback)
+            list(APPEND KUART_DYNAMIC_FIXTURE_SOURCES
+                "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/fixtures/DynamicPayload${name}.java")
+            list(APPEND KUART_DYNAMIC_FIXTURE_OUTPUTS
+                "${KUART_DYNAMIC_FIXTURES}/DynamicPayload${name}.dex")
+        endforeach()
+        add_custom_command(OUTPUT ${KUART_DYNAMIC_FIXTURE_OUTPUTS}
+            COMMAND timeout 120 bash ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-dynamic-fixtures.sh
+                "${KUART_DYNAMIC_FIXTURES}" ${KUART_DYNAMIC_FIXTURE_SOURCES}
+            DEPENDS ${KUART_DYNAMIC_FIXTURE_SOURCES} kudroid_framework_dex
+                kuart-tests/build-dynamic-fixtures.sh)
+        set(KUART_DYNAMIC_TEST_DEX "${CMAKE_BINARY_DIR}/dynamic-loading-tests.dex")
+        set(KUART_DYNAMIC_TEST_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/DynamicLoadingTests.java"
+            "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/java/nio/TestBufferViews.java")
+        add_custom_command(OUTPUT "${KUART_DYNAMIC_TEST_DEX}"
+            COMMAND timeout 120 bash ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh
+                "${KUART_DYNAMIC_TEST_DEX}" ${KUART_DYNAMIC_TEST_SOURCES}
+            DEPENDS ${KUART_DYNAMIC_TEST_SOURCES} kudroid_framework_dex kuart-tests/build-java-test.sh)
+        add_custom_target(kuart_dynamic_loading_dex
+            DEPENDS "${KUART_DYNAMIC_TEST_DEX}" ${KUART_DYNAMIC_FIXTURE_OUTPUTS})
+        add_executable(test_kuart_dynamic_loading kuart-tests/test_kuart_dynamic_loading.cpp)
+        target_link_libraries(test_kuart_dynamic_loading PRIVATE kudroid_core art_dex)
+        target_include_directories(test_kuart_dynamic_loading PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_dynamic_loading PRIVATE
+            KUART_DYNAMIC_TEST_DEX="${KUART_DYNAMIC_TEST_DEX}"
+            KUART_DYNAMIC_FIXTURES="${KUART_DYNAMIC_FIXTURES}")
+        add_dependencies(test_kuart_dynamic_loading kuart_dynamic_loading_dex)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
+            include(CheckCXXSourceCompiles)
+            set(KUART_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+            set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -fsanitize=address,undefined")
+            check_cxx_source_compiles("int main() { return 0; }" KUDROID_HAVE_SANITIZER_RUNTIME)
+            set(CMAKE_REQUIRED_FLAGS "${KUART_SAVED_REQUIRED_FLAGS}")
+        endif()
+        if(KUDROID_HAVE_SANITIZER_RUNTIME AND NOT APPLE)
+            add_executable(test_kuart_dynamic_loading_sanitized EXCLUDE_FROM_ALL
+                kuart-tests/test_kuart_dynamic_loading.cpp
+                src/kuart/DexClassLinker.cpp
+                third_party/art_dex/dex/dex_file_verifier.cc)
+            target_link_libraries(test_kuart_dynamic_loading_sanitized PRIVATE kudroid_core art_dex)
+            target_include_directories(test_kuart_dynamic_loading_sanitized PRIVATE include kuart-tests)
+            target_compile_definitions(test_kuart_dynamic_loading_sanitized PRIVATE
+                KUART_DYNAMIC_TEST_DEX="${KUART_DYNAMIC_TEST_DEX}"
+                KUART_DYNAMIC_FIXTURES="${KUART_DYNAMIC_FIXTURES}")
+            target_compile_options(test_kuart_dynamic_loading_sanitized PRIVATE
+                -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(test_kuart_dynamic_loading_sanitized PRIVATE -fsanitize=address,undefined)
+            add_dependencies(test_kuart_dynamic_loading_sanitized kuart_dynamic_loading_dex)
+        endif()
+    endif()
 
     # java.net HTTP/TLS scenarios: Java test classes dexed against the framework, driven by a
     # native harness that provides the servers.

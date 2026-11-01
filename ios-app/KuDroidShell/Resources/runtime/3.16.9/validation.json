@@ -1,0 +1,32 @@
+{
+  "flutter_version": "3.16.9",
+  "flutter_revision": "41456452f29d64e8deb623a3c927524bcf9f111b",
+  "engine_revision": "f40e976bedff57e69e1b3d89a7c2a3c617a03dad",
+  "dart_revision": "3b128c5454834a1aaef37d9bb12595e7c217ab61",
+  "dart_version": "3.2.6",
+  "original_build_id": "906784233a7115d633b9295589a1b16a2329b46a",
+  "reference_sha256": "e0938d7b69ddd2af1f2f31d85d1dc3188b4ecc73391f8c7b81f22a62b1c8c4b6",
+  "candidate_sha256": "219da535662a1e99687b9c91cc9373878e721e8edc983b0e87a358cf18b7c2b1",
+  "candidate_build_id": "7bded7a368791f9d0a533380efd4ec70d3ec6ca6",
+  "vm_snapshot_hash": "f71c76320d35b65f1164dbaa6d95fe09",
+  "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+  "isolate_snapshot_hash": "f71c76320d35b65f1164dbaa6d95fe09",
+  "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+  "missing_exports": [],
+  "extra_dependencies": [],
+  "extra_imports": [
+    "__vsprintf_chk",
+    "exit",
+    "vprintf"
+  ],
+  "reviewed_extra_imports": {
+    "__vsprintf_chk": "bionic___vsprintf_chk",
+    "exit": "host C library process exit",
+    "vprintf": "bionic_vprintf"
+  },
+  "unreviewed_imports": [],
+  "missing_jni_signatures": [],
+  "preflight_passed": true,
+  "device_verified": false,
+  "errors": []
+}

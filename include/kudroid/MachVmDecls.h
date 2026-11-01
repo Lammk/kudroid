@@ -8,27 +8,13 @@
 #define KUDROID_MACHVMDECLS_H
 
 #include <mach/mach.h>
+#include <mach/vm_region.h>
 #include <TargetConditionals.h>
 
-// VM_REGION_BASIC_INFO_64 asks the kernel for a region's current and MAXIMUM
-// protection. max_protection is the honest answer to "can this page ever be
-// executable here"; unlike a succeeded mprotect it is never silently clamped,
-// and unlike executing the page it cannot kill the process. Layout mirrors
-// XNU's vm_region_basic_info_data_64_t: five ints, a 64-bit offset (making the
-// struct 40 bytes), then behavior and user_wired_count.
-#define KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR 9
-#define KUDROID_VM_REGION_BASIC_INFO_64_COUNT 10
-typedef struct kudroid_vm_region_basic_info_64 {
-    vm_prot_t protection;
-    vm_prot_t max_protection;
-    vm_inherit_t inheritance;
-    boolean_t shared;
-    boolean_t reserved;
-    memory_object_offset_t offset;
-    vm_behavior_t behavior;
-    unsigned short user_wired_count;
-    unsigned short _kudroid_pad;
-} kudroid_vm_region_basic_info_64_t;
+// Use the SDK's packed message layout and count for region queries.
+#define KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR VM_REGION_BASIC_INFO_64
+#define KUDROID_VM_REGION_BASIC_INFO_64_COUNT VM_REGION_BASIC_INFO_COUNT_64
+typedef vm_region_basic_info_data_64_t kudroid_vm_region_basic_info_64_t;
 
 // VM_REGION_EXTENDED_INFO adds what basic info cannot say: whether the region is
 // backed by a file pager (external_pager) and how it is shared. Mirrors XNU's

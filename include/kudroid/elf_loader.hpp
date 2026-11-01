@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <functional>
 
 #include "kudroid/ExecMemory.h"
 
@@ -65,7 +66,16 @@ public:
     bool map();
 
     /// applies dynamic repositioning and resolution of symbols.
-    bool relocate();
+    bool relocate(const std::function<bool()>& finalizer = {});
+
+    // Named function bindings may change only during relocation finalization.
+    bool interposeFunction(const char* name, void* replacement) {
+        return interpositionSink_ && interpositionSink_(name, replacement);
+    }
+    void setImportScope(ElfLoader* scope) { importScope_ = scope; }
+    void retainRuntimeAttachment(std::shared_ptr<void> attachment) {
+        runtimeAttachment_ = std::move(attachment);
+    }
 
     void setLibraryManager(LibraryManager* manager) { libraryManager_ = manager; }
 
@@ -149,6 +159,7 @@ private:
     std::size_t          dataMapSize_ = 0;
     std::uint64_t        entry_    = 0;
     std::vector<Segment> segments_;
+    std::vector<Segment> relroRanges_;
     bool                 parsed_   = false;
     std::string          lastError_;
 
@@ -164,6 +175,9 @@ private:
     bool                 symbolIndexBuilt_ = false;
 
     LibraryManager*      libraryManager_ = nullptr;
+    ElfLoader*           importScope_ = nullptr;
+    std::function<bool(const char*, void*)> interpositionSink_;
+    std::shared_ptr<void> runtimeAttachment_;
     
     // tls
     std::uint64_t        tls_vaddr_  = 0;

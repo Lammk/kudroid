@@ -1,12 +1,14 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/ElfX18.h"
 #include "kudroid/ElfPackedRelocations.h"
+#include "kudroid/ElfAliasStore.h"
 #include "kudroid/BionicShim.h"
 #include "kudroid/ExecMemory.h"
 #include "kudroid/FmodVorbisFallback.h"
 extern "C" int kudroid_tls_stub_params(std::int64_t* tsdSlotOffset, std::int64_t* tlsPointerOffset);
 
 #include <atomic>
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -113,6 +115,7 @@ ElfLoader::ElfLoader(std::string path)
     : path_(std::move(path)) {}
 
 ElfLoader::~ElfLoader() {
+    GuestElfWritableAliases().Remove(reinterpret_cast<uintptr_t>(base_));
     releaseFileMapping();
     if (splitImage_) {
         // One deallocate covers the whole span: RX alias prefix + RW data suffix.
@@ -168,6 +171,7 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
       dataMapSize_(other.dataMapSize_),
       entry_(other.entry_),
       segments_(std::move(other.segments_)),
+      relroRanges_(std::move(other.relroRanges_)),
       parsed_(other.parsed_),
       lastError_(std::move(other.lastError_)),
       fileData_(other.fileData_),
@@ -175,6 +179,8 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
       symbolIndex_(std::move(other.symbolIndex_)),
       symbolIndexBuilt_(other.symbolIndexBuilt_),
       libraryManager_(other.libraryManager_),
+      importScope_(other.importScope_),
+      runtimeAttachment_(std::move(other.runtimeAttachment_)),
       tls_vaddr_(other.tls_vaddr_),
       tls_filesz_(other.tls_filesz_),
       tls_memsz_(other.tls_memsz_),
@@ -204,11 +210,14 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
 
 ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
     if (this != &other) {
+        GuestElfWritableAliases().Remove(reinterpret_cast<uintptr_t>(base_));
         releaseFileMapping();
         if (allocBase_) {
             ExecMemory::Free(allocRegion_);
         }
         path_ = std::move(other.path_);
+        importScope_ = other.importScope_;
+        runtimeAttachment_ = std::move(other.runtimeAttachment_);
         base_ = other.base_;
         execBase_ = other.execBase_;
         writeBase_ = other.writeBase_;
@@ -224,6 +233,7 @@ ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
         dataMapSize_ = other.dataMapSize_;
         entry_ = other.entry_;
         segments_ = std::move(other.segments_);
+        relroRanges_ = std::move(other.relroRanges_);
         parsed_ = other.parsed_;
         lastError_ = std::move(other.lastError_);
         fileData_ = other.fileData_;
@@ -267,6 +277,7 @@ const char* ElfLoader::lastError() const {
 
 bool ElfLoader::parse() {
     segments_.clear();
+    relroRanges_.clear();
     entry_ = 0;
     lastError_.clear();
 
@@ -354,6 +365,11 @@ bool ElfLoader::parse() {
             seg.memsz  = phdr.p_memsz;
             seg.flags  = phdr.p_flags;
             segments_.push_back(seg);
+        } else if (phdr.p_type == 0x6474e552) { // PT_GNU_RELRO
+            Segment range;
+            range.vaddr = phdr.p_vaddr;
+            range.memsz = phdr.p_memsz;
+            relroRanges_.push_back(range);
         } else if (phdr.p_type == 7) { // pt_tls
             // tls initialization template
             tls_vaddr_ = phdr.p_vaddr;
@@ -1008,7 +1024,7 @@ bool ElfLoader::map() {
     return true;
 }
 
-bool ElfLoader::relocate() {
+bool ElfLoader::relocate(const std::function<bool()>& finalizer) {
     if (!parsed_) {
         lastError_ = "Must call parse() before relocate()";
         return false;
@@ -1053,8 +1069,11 @@ bool ElfLoader::relocate() {
     uint64_t relrVaddr = 0, relrSize = 0, relrEnt = 8;
     uint64_t packedVaddr = 0, packedSize = 0, packedCount = 0;
     uint64_t symtabVaddr = 0, strtabVaddr = 0, strsz = 0;
+    bool symbolicBinding = false;
     for (size_t i = 0; i < dynamicCount && dynamic[i].d_tag != DT_NULL; ++i) {
         switch (dynamic[i].d_tag) {
+            case 16: symbolicBinding = true; break; // DT_SYMBOLIC
+            case 30: symbolicBinding |= (dynamic[i].d_val & 2) != 0; break; // DF_SYMBOLIC
             case DT_RELA: relaVaddr = dynamic[i].d_val; break;
             case DT_RELASZ: relaSize = dynamic[i].d_val; break;
             case DT_RELAENT: relaEnt = dynamic[i].d_val; break;
@@ -1195,11 +1214,11 @@ bool ElfLoader::relocate() {
                 address = reinterpret_cast<void*>(symtab[symbolIndex].st_value);
             } else if (symtab[symbolIndex].st_shndx != 0) {
                 address = static_cast<char*>(base_) + symtab[symbolIndex].st_value;
-            } else if (libraryManager_) {
-                address = libraryManager_->resolveGlobalSymbol(name, !isWeakUndef);
-                if (!address) address = resolve_bionic_symbol(name, !isWeakUndef);
             } else {
-                address = resolve_bionic_symbol(name, !isWeakUndef);
+                if (importScope_) address = importScope_->getSymbolAddress(name);
+                if (!address && libraryManager_)
+                    address = libraryManager_->resolveGlobalSymbol(name, !isWeakUndef);
+                if (!address) address = resolve_bionic_symbol(name, !isWeakUndef);
             }
             if (!address && !isWeakUndef && symbolIndex != 0) {
                 // Record unresolved imports before guest execution.
@@ -1345,6 +1364,42 @@ bool ElfLoader::relocate() {
             symtabVaddr != 0 ? "present" : "absent");
 
     if (ok) {
+        if (finalizer) {
+            interpositionSink_ = [&](const char* requested, void* replacement) {
+                if (!requested || !*requested || !replacement || symbolicBinding ||
+                    !jmpRelSize || jmpRelSize % sizeof(Elf64Rela)) return false;
+                const auto offset = vaddrToFileOffset(jmpRelVaddr, jmpRelSize);
+                if (offset == UINT64_MAX) return false;
+                const auto* entries = reinterpret_cast<const Elf64Rela*>(fileData_ + offset);
+                std::vector<std::pair<uint64_t*, uint64_t>> writes;
+                for (size_t i = 0; i < jmpRelSize / sizeof(Elf64Rela); ++i) {
+                    const auto& entry = entries[i];
+                    if ((entry.r_info & 0xffffffffu) != R_AARCH64_JUMP_SLOT) continue;
+                    const size_t index = entry.r_info >> 32;
+                    if (index >= symbolCount || symtab[index].st_name >= strsz) return false;
+                    const auto& symbol = symtab[index];
+                    const char* name = strtab + symbol.st_name;
+                    if (!std::memchr(name, 0, strsz - symbol.st_name)) return false;
+                    if (std::strcmp(name, requested)) continue;
+                    const auto binding = symbol.st_info >> 4;
+                    if ((binding != 1 && binding != 2) || (symbol.st_info & 15) != 2 ||
+                        (symbol.st_other & 3) != 0 || !mappedRange(entry.r_offset, 8)) return false;
+                    writes.emplace_back(reinterpret_cast<uint64_t*>(writeAt(entry.r_offset - minVaddr_)),
+                        reinterpret_cast<uintptr_t>(replacement) + entry.r_addend);
+                }
+                if (writes.empty()) return false;
+                // Validate every matching relocation before publishing any binding.
+                for (const auto& write : writes) *write.first = write.second;
+                return true;
+            };
+            struct ClearInterposition {
+                std::function<bool(const char*, void*)>& sink;
+                ~ClearInterposition() { sink = {}; }
+            } clear{interpositionSink_};
+            ok = finalizer();
+        }
+    }
+    if (ok) {
         ok = applyProtections();
         if (!ok) lastError_ = "Failed to apply ELF segment protections";
     }
@@ -1371,6 +1426,7 @@ char* ElfLoader::writePtrAt(std::uint64_t vaddr) {
 }
 
 bool ElfLoader::applyProtections() {
+    GuestElfWritableAliases().Remove(reinterpret_cast<uintptr_t>(base_));
     if (splitImage_) {
         return applyProtectionsSplit();
     }
@@ -1414,18 +1470,7 @@ bool ElfLoader::applyProtections() {
         }
     }
 
-    // On iOS (and non-JIT environments), pages marked both writable and executable
-    // (W^X violation) result in SIGBUS when instructions are fetched from them.
-    // Since all ELF relocations, GOT updates, and initial data writes have ALREADY
-    // been performed into the mapping while it was writable, strip PROT_WRITE from
-    // any page that contains executable code (PROT_EXEC) so that it remains cleanly RX.
-    //
-    // Shared-page hazard (16K host pages vs 4K-oriented ELF layout): an RX tail and
-    // an RW head can share one host page. RX must win (code has to execute), but
-    // any RUNTIME-writable bytes on that page (.data/.bss, not RELRO which is
-    // read-only after the relocations above) will fault on store — previously
-    // misattributed to guest bugs and hidden by the fault skipper. Count and name
-    // those pages loudly instead of silently picking RX.
+    // Keep executable pages RX. Shared writable data uses a prepared RW alias.
     for (size_t i = 0; i < numPages; ++i) {
         if (pageProts[i] & PROT_EXEC) {
             if (pageProts[i] & PROT_WRITE) {
@@ -1442,11 +1487,54 @@ bool ElfLoader::applyProtections() {
                     }
                 }
                 if (runtimeWritable) {
-                    std::fprintf(stderr,
-                                 "[KuDroidELF] W^X conflict page %zu: RX wins, runtime-writable "
-                                 "bytes on it will fault on store (relocate the library with "
-                                 "page-aligned segments if this fires)\n",
-                                 i);
+                    if (preparedImage_ && allocRegion_.writeView != mapBase) {
+                        // Keep code RX; publish only writable bytes outside RELRO and text.
+                        for (const auto& seg : segments_) {
+                            if (!(seg.flags & 2) || (seg.flags & 1)) continue;
+                            const uint64_t begin = std::max(seg.vaddr, pageStart);
+                            const uint64_t end = std::min(seg.vaddr + seg.memsz, pageEnd);
+                            if (begin >= end) continue;
+                            std::vector<std::pair<uint64_t, uint64_t>> ranges{{seg.vaddr, seg.vaddr + seg.memsz}};
+                            auto exclude = [&](uint64_t start, uint64_t finish) {
+                                std::vector<std::pair<uint64_t, uint64_t>> kept;
+                                for (const auto& range : ranges) {
+                                    if (start >= range.second || finish <= range.first) {
+                                        kept.push_back(range);
+                                    } else {
+                                        if (range.first < start) kept.emplace_back(range.first, start);
+                                        if (finish < range.second) kept.emplace_back(finish, range.second);
+                                    }
+                                }
+                                ranges = std::move(kept);
+                            };
+                            for (const auto& ro : relroRanges_) exclude(ro.vaddr, ro.vaddr + ro.memsz);
+                            for (const auto& text : segments_) {
+                                if (text.flags & 1) exclude(text.vaddr, text.vaddr + text.memsz);
+                            }
+                            for (const auto& range : ranges) {
+                                const uint64_t faultStart = std::max(range.first, begin);
+                                const uint64_t faultEnd = std::min(range.second, end);
+                                if (faultStart >= faultEnd) continue;
+                                if (!GuestElfWritableAliases().Add(
+                                        reinterpret_cast<uintptr_t>(base_),
+                                        reinterpret_cast<uintptr_t>(base_) + range.first,
+                                        reinterpret_cast<uintptr_t>(allocRegion_.writeView) + range.first - minVaddr,
+                                        range.second - range.first,
+                                        reinterpret_cast<uintptr_t>(base_) + faultStart,
+                                        faultEnd - faultStart)) {
+                                    GuestElfWritableAliases().Remove(reinterpret_cast<uintptr_t>(base_));
+                                    lastError_ = "ELF writable alias registration failed";
+                                    return false;
+                                }
+                            }
+                        }
+                        std::fprintf(stderr, "[KuDroidELF] Shared exec/data page %zu: writable data uses alias stores\n", i);
+                    } else {
+                        std::fprintf(stderr,
+                                     "[KuDroidELF] W^X conflict page %zu: RX wins, runtime-writable "
+                                     "bytes on it will fault on store (relocate the library with "
+                                     "page-aligned segments if this fires)\n", i);
+                    }
                 }
             }
             pageProts[i] &= ~PROT_WRITE;

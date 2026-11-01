@@ -85,7 +85,7 @@ package java.util.regex;
 /*
  * This class is a range that contains only surrogate characters.
  */
-class LowHighSurrogateRangeSet extends JointSet {
+class LowHighSurrogateRangeSet extends CharacterClassSet {
     
     protected AbstractCharClass surrChars;
 
@@ -121,7 +121,7 @@ class LowHighSurrogateRangeSet extends JointSet {
     /**
      * Returns stringIndex+shift, the next position to match
      */
-    public int matches(int stringIndex, CharSequence testString,
+    int accepts(int stringIndex, CharSequence testString,
             MatchResultImpl matchResult) {
         int startStr = matchResult.getLeftBound();
         int strLength = matchResult.getRightBound(); 
@@ -157,7 +157,7 @@ class LowHighSurrogateRangeSet extends JointSet {
             }
         }
         
-        return next.matches(stringIndex + 1, testString, matchResult);
+        return 1;
     }
     
     protected String getName() {

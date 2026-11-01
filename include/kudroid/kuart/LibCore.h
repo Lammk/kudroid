@@ -44,6 +44,9 @@ bool Invoke_libcore_io_KuZlib(Interpreter* interp, const char* name, const DexVa
 bool Invoke_libcore_io_KuTls(Interpreter* interp, const char* name, const DexValue* args,
                              size_t num_args, DexValue* result);
 
+bool Invoke_libcore_io_KuCrypto(Interpreter* interp, const char* name, const DexValue* args,
+                                size_t num_args, DexValue* result);
+
 // Object plumbing shared with the interpreter.
 // Read a reference instance field, or null when the object or field is absent.
 DexObject* LibCoreGetRefField(DexObject* obj, const char* name, const char* type);

@@ -107,7 +107,43 @@ public class File implements Comparable<File> {
 
     public native boolean mkdir();
 
-    public native boolean createNewFile() throws IOException;
+    private native boolean createNewFile0() throws IOException;
+
+    public boolean createNewFile() throws IOException {
+        if (path.length() == 0 || path.indexOf('\u0000') >= 0)
+            throw new IOException("Invalid file path");
+        return createNewFile0();
+    }
+
+    private static final class TempNames {
+        static final java.util.Random RANDOM = new java.util.Random();
+    }
+
+    private static synchronized long nextTempName() {
+        return TempNames.RANDOM.nextLong() & Long.MAX_VALUE;
+    }
+
+    public static File createTempFile(String prefix, String suffix, File directory)
+            throws IOException {
+        if (prefix == null) throw new NullPointerException("prefix == null");
+        if (prefix.length() < 3) throw new IllegalArgumentException("Prefix too short");
+        if (suffix == null) suffix = ".tmp";
+        if (prefix.indexOf('/') >= 0 || suffix.indexOf('/') >= 0 ||
+                prefix.indexOf('\u0000') >= 0 || suffix.indexOf('\u0000') >= 0) {
+            throw new IOException("Invalid temporary-file name");
+        }
+        File dir = directory != null ? directory
+                : new File(System.getProperty("java.io.tmpdir", "."));
+        for (int attempt = 0; attempt < 100; attempt++) {
+            File file = new File(dir, prefix + nextTempName() + suffix);
+            if (file.createNewFile()) return file;
+        }
+        throw new IOException("Unable to create a unique temporary file");
+    }
+
+    public static File createTempFile(String prefix, String suffix) throws IOException {
+        return createTempFile(prefix, suffix, null);
+    }
 
     public native boolean renameTo(File dest);
 

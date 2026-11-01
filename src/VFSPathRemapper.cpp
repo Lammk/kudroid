@@ -613,7 +613,7 @@ bool VFSPathRemapper::init_pseudo_files() {
     // The paths are built into std::string and kept alive in `owned` — PseudoFile holds a
     // const char*, and a temporary would dangle before the write loop runs.
     std::vector<std::string> owned;
-    owned.reserve(static_cast<size_t>(cpu.total_cores) * 6);
+    owned.reserve(static_cast<size_t>(cpu.total_cores) * 8);
     for (uint32_t i = 0; i < cpu.total_cores; ++i) {
         const bool performance = i < cpu.performance_cores;
         const uint32_t max_khz =
@@ -646,6 +646,10 @@ bool VFSPathRemapper::init_pseudo_files() {
                          std::to_string(capacity) + "\n", true});
         owned.push_back(base + "/topology/physical_package_id");
         files.push_back({owned.back().c_str(), "0\n", true});
+        owned.push_back(base + "/topology/package_cpus_list");
+        files.push_back({owned.back().c_str(), DecimalRange(cpu.total_cores), true});
+        owned.push_back(base + "/topology/core_siblings_list");
+        files.push_back({owned.back().c_str(), DecimalRange(cpu.total_cores), true});
     }
 
     files.push_back({"proc/mounts",

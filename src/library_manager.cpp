@@ -2,6 +2,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/FlutterRuntime.h"
+#include "kudroid/RuntimeCageAdapter.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -160,8 +161,8 @@ bool LibraryManager::loadRecursive(const std::string& path) {
             return false;
         }
         std::string reason;
-        const std::string candidate = bundledFlutterRuntimePath();
-        const bool substitute = isConstrainedFlutterEligible(key, candidate, reason);
+        const std::string candidate = selectConstrainedFlutterRuntime(key, bundledFlutterRuntimeDirectory(), reason);
+        const bool substitute = !candidate.empty();
         std::string message;
         if (substitute) {
             physicalPath = candidate;
@@ -214,7 +215,9 @@ bool LibraryManager::loadRecursive(const std::string& path) {
         }
     }
 
-    if (!current->map() || !current->relocate()) {
+    if (!current->map() || !current->relocate([&] {
+            return installRuntimeCageAdapter(*this, *current);
+        })) {
         lastError_ = "Load failed for " + key + ": " + current->lastError();
         std::fprintf(stderr, "[kudroid_core] %s\n", lastError_.c_str());
         libraries_.erase(key);

@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include "kudroid/Log.h"
+#include "kudroid/BionicShim.h"
 #include "kudroid/NativeCallTelemetry.h"
 #include "kudroid/platform/MemoryInfo.h"
 
@@ -358,20 +359,21 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
 
 bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
     if (method == nullptr) return false;
-    if (method->native_fn != nullptr) return true;
+    if (method->native_fn != nullptr && !is_universal_dummy(method->native_fn)) return true;
+    method->native_fn = nullptr;
     if (LibCoreHasMethod(method)) return true;
     if (symbol_lookup_ == nullptr || method->declaring_class == nullptr) return false;
 
     const char* descriptor = method->declaring_class->descriptor;
     // Try a short name first (no signature suffix) like Android's JNI linker.
     const std::string short_name = MangleJniName(descriptor, method->name);
-    if (void* fn = symbol_lookup_(short_name.c_str())) {
+    if (void* fn = symbol_lookup_(short_name.c_str()); fn != nullptr && !is_universal_dummy(fn)) {
         method->native_fn = fn;
         return true;
     }
     const std::string long_name =
         MangleJniNameLong(descriptor, method->name, method->signature);
-    if (void* fn = symbol_lookup_(long_name.c_str())) {
+    if (void* fn = symbol_lookup_(long_name.c_str()); fn != nullptr && !is_universal_dummy(fn)) {
         method->native_fn = fn;
         return true;
     }
@@ -552,19 +554,6 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         KLOGV("KuARTNative", "bypassing NetworkObserver.Log -> returning immediately");
         native_call_exit();
         return result;
-    }
-
-    // Unity's NativeLoader verifies that native libraries (libmain.so, libunity.so) are loaded.
-    // In KuDroid, all ELF libraries are pre-loaded by the core runtime before Java startup.
-    // Returning true (1) confirms library availability so UnityPlayer proceeds to native initialization.
-    if (std::strstr(owner, "NativeLoader") != nullptr) {
-        if (std::strcmp(method_name, "load") == 0 ||
-            std::strcmp(method_name, "unload") == 0 ||
-            std::strcmp(method_name, "initialize") == 0) {
-            KLOGV("KuARTNative", "Unity NativeLoader.%s -> returning true", method_name);
-            native_call_exit();
-            return DexValue::Int(1);
-        }
     }
 
     // The first parameter after env is receiver (instance) or jclass (static).
@@ -900,11 +889,15 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
 
     if (method->IsNative()) {
         if (!LinkNativeMethod(method)) {
-            // Silent zero by design (graceful degradation): a previous
-            // hardening revision threw UnsatisfiedLinkError here and hung
-            // boot — startup code calls natives that legitimately have no
-            // binding yet and limps on with 0. The link-fail line above
-            // already names the method, so nothing is hidden.
+            if (!interpreter_->HasPendingException()) {
+                std::string detail = "unbound native method: ";
+                if (method->declaring_class != nullptr) {
+                    detail += method->declaring_class->PrettyName() + ".";
+                }
+                detail += method->name != nullptr ? method->name : "?";
+                if (method->signature != nullptr) detail += method->signature;
+                interpreter_->ThrowException("Ljava/lang/UnsatisfiedLinkError;", detail);
+            }
             return result;
         }
         return CallNative(method, vals.data(), vals.size());
@@ -947,6 +940,7 @@ DexValue DexJniEnv::CallJavaV(DexObject* receiver, DexMethod* method, va_list ar
 
 DexObject* DexJniEnv::NewObjectA(DexClass* klass, DexMethod* ctor, const jvalue* args) {
     if (klass == nullptr || linker_ == nullptr) return nullptr;
+    if (interpreter_ != nullptr && !interpreter_->EnsureInitialized(klass)) return nullptr;
     DexObject* obj = linker_->AllocObject(klass);
     if (obj == nullptr) return nullptr;
     if (ctor != nullptr) CallJavaA(obj, ctor, args, /*virtual_dispatch=*/false);

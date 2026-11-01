@@ -61,6 +61,15 @@ public final class Arrays {
         }
     }
 
+    public static void fill(Object[] a, int fromIndex, int toIndex, Object value) {
+        int length = a.length;
+        if (fromIndex > toIndex) throw new IllegalArgumentException("fromIndex > toIndex");
+        if (fromIndex < 0 || toIndex > length) throw new ArrayIndexOutOfBoundsException();
+        if (fromIndex < toIndex && value != null && !a.getClass().getComponentType().isInstance(value))
+            throw new ArrayStoreException();
+        for (int i = fromIndex; i < toIndex; i++) a[i] = value;
+    }
+
     public static int[] copyOf(int[] a, int newLength) {
         int[] out = new int[newLength];
         System.arraycopy(a, 0, out, 0, Math.min(a.length, newLength));

@@ -2,6 +2,8 @@
 """Exercise compatibility rejection and original-path loader identity."""
 
 import argparse
+import copy
+import json
 import os
 from pathlib import Path
 import shutil
@@ -23,11 +25,19 @@ def main():
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--version", default="3.32.5")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     original_data = args.reference.read_bytes()
     app_data = args.snapshot.read_bytes()
     candidate_data = args.candidate.read_bytes()
+    manifest = json.loads((args.manifest or root / "ios-app/KuDroidShell/Resources/runtime/manifest.json").read_text())
+    full_catalog = copy.deepcopy(manifest)
+    record = next(r for r in manifest["engines"] if r["flutter_version"] == args.version)
+    record = copy.deepcopy(record)
+    record["path"] = args.version + "/libflutter.so"
+    manifest = {"schema_version": 1, "engines": [record]}
     tests = 0
     with tempfile.TemporaryDirectory(prefix="kudroid-flutter-selector-") as temp:
         directory = Path(temp)
@@ -39,8 +49,9 @@ def main():
              "-lcrypto", "-pthread", "-o", str(executable)])
         original = directory / "libflutter.so"
         app = directory / "libapp.so"
-        candidate = directory / "candidate/libflutter.so"
-        candidate.parent.mkdir()
+        runtime = directory / "runtime"
+        candidate = runtime / record["path"]
+        candidate.parent.mkdir(parents=True)
         other = directory / "other/libflutter.so"
         other.parent.mkdir()
         other.write_bytes(original_data)
@@ -49,8 +60,14 @@ def main():
         alias.symlink_to(directory, target_is_directory=True)
 
         def check(label, expected, original_bytes=original_data, app_bytes=app_data,
-                  candidate_bytes=candidate_data, mode="selector", requested=None):
+                  candidate_bytes=candidate_data, mode="selector", requested=None,
+                  catalog=manifest):
             nonlocal tests
+            manifest_path = runtime / "manifest.json"
+            if catalog is None:
+                manifest_path.unlink(missing_ok=True)
+            else:
+                manifest_path.write_text(catalog if isinstance(catalog, str) else json.dumps(catalog))
             original.write_bytes(original_bytes)
             if app_bytes is None:
                 app.unlink(missing_ok=True)
@@ -68,14 +85,15 @@ def main():
             print("PASS:", label)
 
         check("pinned engine and both AOT snapshots", True)
+        check("full bundled catalog picks the matching identity", True, catalog=full_catalog)
         check("unknown original engine", False,
-              original_bytes=original_data.replace(bytes.fromhex("fb5eaead4cf4256da528a8ebbd653cdf89ec99bc"), b"\0" * 20))
+              original_bytes=original_data.replace(bytes.fromhex(record["original_build_id"]), b"\0" * 20))
         check("missing AOT library", False, app_bytes=None)
         check("malformed ELF header", False, app_bytes=b"\x7fELF")
         changed = bytearray(app_data)
         struct.pack_into("<Q", changed, 32, len(changed) + 4096)
         check("out-of-range program headers", False, app_bytes=changed)
-        features = b"product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers"
+        features = record["vm_snapshot_features"].encode()
         positions = []
         position = -1
         while True:
@@ -99,6 +117,52 @@ def main():
         changed = bytearray(candidate_data)
         changed[-1] ^= 1
         check("modified candidate with intact build ID", False, candidate_bytes=changed)
+        check("missing catalog", False, catalog=None)
+        check("malformed JSON", False, catalog="{")
+        check("trailing JSON rejected", False, catalog=json.dumps(manifest) + " {}")
+        check("deeply nested JSON rejected", False, catalog="[" * 1000 + "]" * 1000)
+        check("oversized JSON rejected", False, catalog=" " * 65537)
+        changed_manifest = copy.deepcopy(manifest)
+        changed_manifest["schema_version"] = 2
+        check("unknown schema rejected", False, catalog=changed_manifest)
+        for field in ("static_verified", "candidate_sha256", "candidate_build_id", "vm_snapshot_hash", "isolate_snapshot_features"):
+            changed_manifest = copy.deepcopy(manifest)
+            del changed_manifest["engines"][0][field]
+            check(f"missing {field} rejected", False, catalog=changed_manifest)
+        changed_manifest = copy.deepcopy(manifest)
+        changed_manifest["engines"][0]["static_verified"] = False
+        check("unverified record rejected", False, catalog=changed_manifest)
+        for unsafe in ("../libflutter.so", str(candidate), "../runtime/" + record["path"]):
+            changed_manifest = copy.deepcopy(manifest)
+            changed_manifest["engines"][0]["path"] = unsafe
+            check("unsafe relative or absolute path rejected", False, catalog=changed_manifest)
+        escape = runtime / "escape"
+        escape.symlink_to(directory, target_is_directory=True)
+        changed_manifest = copy.deepcopy(manifest)
+        changed_manifest["engines"][0]["path"] = "escape/libflutter.so"
+        check("symlink escaping runtime rejected", False, catalog=changed_manifest)
+        changed_manifest = copy.deepcopy(manifest)
+        changed_manifest["engines"].append(copy.deepcopy(record))
+        check("ambiguous catalog rejected", False, catalog=changed_manifest)
+        changed_manifest = copy.deepcopy(manifest)
+        variant = copy.deepcopy(record)
+        variant["vm_snapshot_hash"] = "2" * 32
+        changed_manifest["engines"].append(variant)
+        check("different snapshot variants remain distinct", True, catalog=changed_manifest)
+        changed_manifest = copy.deepcopy(manifest)
+        variant = copy.deepcopy(record)
+        variant["isolate_snapshot_features"] += " extra-feature"
+        changed_manifest["engines"].append(variant)
+        check("same snapshot hash with different features remains distinct", True, catalog=changed_manifest)
+        changed_manifest = copy.deepcopy(manifest)
+        changed_manifest["engines"].append({"static_verified": False})
+        check("an unfinished unrelated record does not hide a valid engine", True, catalog=changed_manifest)
+        changed_manifest = copy.deepcopy(manifest)
+        variant = copy.deepcopy(record)
+        variant["original_build_id"] = "1" * 40
+        changed_manifest["engines"].append(variant)
+        check("same snapshot in a different original identity", True, catalog=changed_manifest,
+              original_bytes=original_data.replace(bytes.fromhex(record["original_build_id"]), bytes.fromhex(variant["original_build_id"])))
         check("one loader for original path, soname and physical alias", True, mode="loader")
         check("missing override retains original identity", False, candidate_bytes=None, mode="loader")
         check("snapshot mismatch retains original identity", False,

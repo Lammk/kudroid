@@ -1310,7 +1310,12 @@ bool Interpreter::FindCatchHandler(const art::CodeItemDataAccessor& accessor,
 bool Interpreter::EnsureInitialized(DexClass* klass) {
     if (klass == nullptr) return false;
     if (klass->status == DexClass::Status::kInitialized) return true;
-    if (klass->status == DexClass::Status::kError) return false;
+    if (klass->status == DexClass::Status::kError) {
+        if (!HasPendingException()) {
+            ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
+        }
+        return false;
+    }
 
     // A second <clinit> would replace static sentinels and split object identity
     // from later field reads. The flag is per class and does not wait, so a

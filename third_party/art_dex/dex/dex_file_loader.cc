@@ -21,9 +21,7 @@
 #include "base/stl_util.h"
 #include "compact_dex_file.h"
 #include "dex_file.h"
-// KuDroid: dex_file_verifier (3.5k LOC) đã bị cắt — DEX lấy từ APK cài trực
-// tiếp, coi là trusted. Tham số `verify` chỉ còn là no-op.
-// #include "dex_file_verifier.h"
+#include "dex_file_verifier.h"
 #include "standard_dex_file.h"
 #include "ziparchive/zip_archive.h"
 
@@ -372,7 +370,17 @@ std::unique_ptr<DexFile> DexFileLoader::OpenCommon(const uint8_t* base,
     dex_file.reset();
     return nullptr;
   }
-  // KuDroid: bỏ DexFileVerifier::Verify — xem comment ở đầu file.
+  if (verify && !DexFileVerifier::Verify(dex_file.get(),
+                                       dex_file->Begin(),
+                                       dex_file->Size(),
+                                       location.c_str(),
+                                       verify_checksum,
+                                       error_msg)) {
+    if (verify_result != nullptr) {
+      *verify_result = VerifyResult::kVerifyFailed;
+    }
+    return nullptr;
+  }
   if (verify_result != nullptr) {
     *verify_result = VerifyResult::kVerifySucceeded;
   }

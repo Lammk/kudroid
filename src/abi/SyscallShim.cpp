@@ -11,6 +11,7 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/ExecMemory.h"
+#include "kudroid/ElfAliasStore.h"
 #include "kudroid/Log.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/GraphicsShim.h"
@@ -1684,6 +1685,12 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
                          length, prot, flags, fd, static_cast<long long>(offset), requested,
                          saved_errno, std::strerror(saved_errno));
         }
+        if (length >= (4ULL << 30) && prot == PROT_NONE && (flags & 0x20) &&
+            (flags & 3) == 2 && !(flags & (0x10 | 0x100000))) {
+            static std::atomic<unsigned> probes{0};
+            if (probes.fetch_add(1, std::memory_order_relaxed) < 2)
+                kudroid_log_virtual_memory_state("reservation-failure");
+        }
         errno = saved_errno;
         return;
     }
@@ -1871,13 +1878,16 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
 
     if (darwin_fd < 0 && (clean_flags & LINUX_MAP_ANONYMOUS) &&
         (darwin_flags & MAP_PRIVATE) &&
-        !(clean_flags & (LINUX_MAP_FIXED | LINUX_MAP_FIXED_NOREPLACE)) &&
+        !(clean_flags & LINUX_MAP_FIXED) && !fixed_noreplace &&
         (prot == PROT_NONE || (prot & PROT_EXEC)) &&
         kudroid::ExecMemory::GuestReservationsAvailable()) {
         void* p = kudroid::ExecMemory::AllocateGuest(length, prot);
-        if (p != MAP_FAILED && bionic_mprotect(p, length, prot) != 0) p = MAP_FAILED;
-        log_mmap_result(p, length, prot, flags, fd, offset, addr);
-        return p;
+        if (p != MAP_FAILED || prot != PROT_NONE || errno != ENOMEM) {
+            if (p != MAP_FAILED && bionic_mprotect(p, length, prot) != 0) p = MAP_FAILED;
+            log_mmap_result(p, length, prot, flags, fd, offset, addr);
+            return p;
+        }
+        // Pool capacity must not limit ordinary non-executable reservations.
     }
 
     // Reserve explicit maximum permissions before any guest code is stored.
@@ -2209,6 +2219,9 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     }
 #endif
     const int saved_errno = errno;
+    if (r == 0 && !(prot & PROT_WRITE)) {
+        kudroid::GuestElfWritableAliases().RemoveOverlapping(address, len);
+    }
     const bool quiet = kudroid::guest_async_handler_active();
     if (quiet) {
         // see bionic_mmap
@@ -2266,7 +2279,9 @@ extern "C" int bionic_munmap(void *addr, size_t len) {
     if (kudroid_page_range_inward(reinterpret_cast<uintptr_t>(addr), len,
                                   host_page > 0 ? static_cast<size_t>(host_page) : 16384u,
                                   &start, &span)) {
-        ::munmap(reinterpret_cast<void*>(start), span);
+        if (::munmap(reinterpret_cast<void*>(start), span) == 0) {
+            kudroid::GuestElfWritableAliases().RemoveOverlapping(start, span);
+        }
     }
     return 0;
 }
@@ -5938,6 +5953,9 @@ static bool isShimPriority(const char* s) {
            strcmp(s, "vkCreateAndroidSurfaceKHR") == 0;
 }
 
+static thread_local std::string s_guestDlError;
+static thread_local bool s_guestDlErrorPending = false;
+
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     if (!symbol) return nullptr;
 
@@ -6042,18 +6060,14 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     if (handle == DUMMY_HANDLE) {
         if (kudroid_guest_symbol_lookup) {
             if (void* guest = kudroid_guest_symbol_lookup(symbol)) {
-                // Distinguish a real resolution from the universal dummy.
-                if (is_universal_dummy(guest)) {
-                    logAndroidMessage(5, "KuDroidSyscall",
-                                      std::string("bionic_dlsym: [") + symbol +
-                                          "] NOT IMPLEMENTED — bound to the universal dummy, "
-                                          "which takes no arguments and returns 0");
-                } else {
+                if (!is_universal_dummy(guest)) {
                     logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via guest LibraryManager");
+                    return guest;
                 }
-                return guest;
             }
         }
+        s_guestDlError = std::string("dlsym: undefined symbol: ") + symbol;
+        s_guestDlErrorPending = true;
         logAndroidMessage(5, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] NOT FOUND (in dummy handle)");
         return nullptr;
     }
@@ -6098,6 +6112,11 @@ extern "C" int bionic_dlclose(void* handle) {
 }
 
 extern "C" char* bionic_dlerror() {
+    if (s_guestDlErrorPending) {
+        s_guestDlErrorPending = false;
+        ::dlerror();
+        return s_guestDlError.data();
+    }
     return ::dlerror();
 }
 
@@ -7112,6 +7131,16 @@ extern "C" void bionic_system_property_read_callback(
     if (!pi || !callback) return;
     const KudroidProp* p = static_cast<const KudroidProp*>(pi);
     callback(cookie, p->name, p->value, 0u);
+}
+
+extern "C" int bionic_system_property_foreach(
+    void (*callback)(const void*, void*), void* cookie) {
+    if (!callback) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (const auto& property : kKnownProps) callback(&property, cookie);
+    return 0;
 }
 
 // dl_iterate_phdr — needed by the guest unwinder to find its exception tables.
@@ -9221,6 +9250,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__system_property_find", reinterpret_cast<void*>(&bionic_system_property_find)},
     {"__system_property_read", reinterpret_cast<void*>(&bionic_system_property_read)},
     {"__system_property_read_callback", reinterpret_cast<void*>(&bionic_system_property_read_callback)},
+    {"__system_property_foreach", reinterpret_cast<void*>(&bionic_system_property_foreach)},
 
     // ELF iteration
     {"dl_iterate_phdr", reinterpret_cast<void*>(&bionic_dl_iterate_phdr)},

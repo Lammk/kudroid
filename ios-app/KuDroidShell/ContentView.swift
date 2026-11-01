@@ -38,6 +38,7 @@ struct ContentView: View {
         .onAppear {
             setupLogDir()
             activateAudioSession()
+            AppDelegate.restorePortraitIfIdle()
         }
     }
 }
@@ -1557,13 +1558,8 @@ class NativeMetalViewController: UIViewController {
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        let req = kudroid_get_requested_orientation()
-        if req == 0 || req == 6 || req == 8 || req == 11 {
-            return .landscape
-        } else if req == 1 || req == 7 || req == 9 || req == 12 {
-            return .portrait
-        }
-        return .allButUpsideDown
+        guard isStarted, !didCleanup else { return .portrait }
+        return AppDelegate.guestOrientationMask(kudroid_get_requested_orientation())
     }
 
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge {
@@ -1688,8 +1684,10 @@ class NativeMetalViewController: UIViewController {
     private func cleanupAndResetOrientation() {
         guard !didCleanup else { return }
         didCleanup = true
+        metalView?.guestGeometryActive = false
         if NativeMetalViewController.sCurrentRunnerVC === self {
             NativeMetalViewController.sCurrentRunnerVC = nil
+            AppDelegate.guestRunnerActive = false
         }
         UIApplication.shared.isIdleTimerDisabled = false
         NativeMetalViewController.isGlobalAppRunning = false
@@ -1706,15 +1704,10 @@ class NativeMetalViewController: UIViewController {
         kudroid_set_soft_input_visible(0)
         kudroid_stop_app()
 
-        // Force orientation back to portrait
         if #available(iOS 16.0, *) {
-            if let windowScene = self.view.window?.windowScene {
-                let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
-                windowScene.requestGeometryUpdate(geometryPreferences) { _ in }
-            }
-        } else {
-            UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+            setNeedsUpdateOfSupportedInterfaceOrientations()
         }
+        AppDelegate.restorePortraitIfIdle()
     }
 
     deinit {
@@ -1723,6 +1716,7 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        guard !didCleanup else { return }
         if let metalLayer = metalView?.layer as? CAMetalLayer {
             let scale = metalView.guestDisplayScale
             metalLayer.contentsScale = scale
@@ -1764,7 +1758,11 @@ class NativeMetalViewController: UIViewController {
         guard size.width > 0, size.height > 0 else { return }
         activateAudioSession()
         NativeMetalViewController.isGlobalAppRunning = true
+        AppDelegate.guestRunnerActive = true
         isStarted = true
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
 
         // By default, No Sleep is enabled (keeps the screen on when playing games)
         UIApplication.shared.isIdleTimerDisabled = true
@@ -1886,8 +1884,8 @@ class NativeMetalViewController: UIViewController {
                 if kudroid_has_crashed() != 0 {
                     self.handleCrash(fallbackLog: logOutput)
                 } else {
+                    self.cleanupAndResetOrientation()
                     if let onEnded = self.onEnded {
-                        self.cleanupAndResetOrientation()
                         onEnded()
                         return
                     }
@@ -2002,6 +2000,7 @@ class NativeMetalView: GuestTouchView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard guestGeometryActive else { return }
         guestPreviewLayer?.frame = bounds
         for video in guestVideoLayers.values { video.frame = bounds }
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
@@ -2191,12 +2190,11 @@ public func kudroid_trigger_haptic(intensity: Int32) {
 
 @_cdecl("kudroid_notify_orientation_change")
 public func kudroid_notify_orientation_change(orientation: Int32) {
-    // After a fatal guest fault the teardown is discarding the session. Rotating the
-    // window resizes the guest's surface, and the dead engine answers that by trying
-    // to pause — which is the freeze the user sees instead of the app closing. The
-    // orientation is restored by the next session, which requests its own.
+    // Only active guests may rotate their surface.
     if kudroid_has_crashed() != 0 { return }
     DispatchQueue.main.async {
+        guard AppDelegate.guestOrientationActive, kudroid_has_crashed() == 0,
+              kudroid_get_requested_orientation() == orientation else { return }
         if #available(iOS 16.0, *) {
             NativeMetalViewController.sCurrentRunnerVC?.setNeedsUpdateOfSupportedInterfaceOrientations()
         }

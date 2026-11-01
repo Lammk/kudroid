@@ -1,9 +1,5 @@
-# art_dex — libdexfile của AOSP ART (Android 10) đã cắt gọn cho KuDroid.
-#
-# Nguồn: third_party/art_src (giữ nguyên làm bản tham chiếu).
-# Đã bỏ: dex_file_verifier (DEX từ APK coi là trusted), mem_map (KuDroid tự mmap),
-#        dex_file_layout, tracking_registrar, external/.
-# Đã thay bằng shim tự viết: android-base/*, ziparchive/*.
+# AOSP libdexfile with portable I/O adapters.
+# VM integration, OAT layout and tracking code are omitted.
 
 add_library(art_dex STATIC
     dex/compact_dex_file.cc
@@ -12,6 +8,7 @@ add_library(art_dex STATIC
     dex/dex_file.cc
     dex/dex_file_exception_helpers.cc
     dex/dex_file_loader.cc
+    dex/dex_file_verifier.cc
     dex/dex_instruction.cc
     dex/modifiers.cc
     dex/primitive.cc

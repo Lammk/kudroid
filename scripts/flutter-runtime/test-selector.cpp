@@ -43,15 +43,17 @@ int main(int argc, char** argv) {
     try {
         require(argc >= 5, "expected mode, original, candidate and expected result");
         const std::string mode = argv[1], original = argv[2], candidate = argv[3];
+        const std::string runtime = std::filesystem::path(candidate).parent_path().parent_path().string();
         const bool expected = std::string(argv[4]) == "1";
         std::string reason;
         if (mode == "selector") {
-            const bool eligible = kudroid::isConstrainedFlutterEligible(original, candidate, reason);
+            const std::string selected = kudroid::selectConstrainedFlutterRuntime(original, runtime, reason);
             std::cout << reason << '\n';
-            require(eligible == expected, "unexpected selector result");
+            require(!selected.empty() == expected, "unexpected selector result");
+            if (expected) require(selected == candidate, "wrong catalog candidate");
         } else if (mode == "map-failure") {
             require(argc > 5, "expected another original engine path");
-            ::setenv("KUDROID_FLUTTER_RUNTIME", candidate.c_str(), 1);
+            ::setenv("KUDROID_FLUTTER_RUNTIME_DIRECTORY", runtime.c_str(), 1);
             kudroid::LibraryManager manager;
             failMapping = true;
             require(!manager.loadRecursive(original), "mapping failure was ignored");
@@ -60,7 +62,7 @@ int main(int argc, char** argv) {
             require(manager.loadRecursive(argv[5]), "failed-load aliases prevented a fresh selection");
             require(manager.libraries().size() == 1 && initializations == 1, "failed selection initialized code");
         } else if (mode == "loader") {
-            ::setenv("KUDROID_FLUTTER_RUNTIME", candidate.c_str(), 1);
+            ::setenv("KUDROID_FLUTTER_RUNTIME_DIRECTORY", runtime.c_str(), 1);
             kudroid::LibraryManager manager;
             require(manager.loadRecursive(original), "initial load failed");
             const auto entries = manager.libraries();

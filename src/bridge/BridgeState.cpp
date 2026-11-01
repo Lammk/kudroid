@@ -423,7 +423,7 @@ void appendTestHeader(std::string& log, const char* test, const char* path) {
 // the installed build version.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
-        "kudroid_core vT1.5 "
+        "kudroid_core vT1.6 "
 #ifdef KUDROID_BUILD_TIME
         KUDROID_BUILD_TIME
 #else

@@ -1,4 +1,5 @@
 #include "kudroid/platform/GraphicsShim.h"
+#include "kudroid/platform/EglCapabilities.h"
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/FramePacer.h"
@@ -2475,6 +2476,7 @@ extern "C" const char* bionic_eglQueryString(EGLDisplay dpy, EGLint name) {
     auto f = eglFn<const char*(EGLDisplay, EGLint)>("eglQueryString");
     if (!f) { EGL_FORWARD_ERR("eglQueryString", ""); return nullptr; }
     const char* s = f(dpy, name);
+    if (name == 0x3055 /* EGL_EXTENSIONS */) s = egl_display_extensions(dpy, s);
     gpuLog("eglQueryString(name=%d) -> %s", name, s ? s : "(null)");
     return s;
 }

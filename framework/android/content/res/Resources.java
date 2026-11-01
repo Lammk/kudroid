@@ -655,6 +655,9 @@ public class Resources {
                 configurationRevision = getResources().mConfigurationRevision;
             }
         }
+        public android.graphics.drawable.Drawable getDrawable(int id) {
+            return getResources().getDrawable(id, this);
+        }
         public int getChangingConfigurations() { return 0; }
         public void dump(int priority, String tag, String prefix) {}
         public synchronized void rebase() {

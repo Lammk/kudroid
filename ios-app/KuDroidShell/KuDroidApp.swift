@@ -43,6 +43,7 @@ final class SharedMetalContainer {
 
 // Share the same gesture lifecycle across rendering backends.
 class GuestTouchView: UIView {
+    var guestGeometryActive = true
     var guestDisplayScale: CGFloat { window?.screen.scale ?? UIScreen.main.scale }
     var guestDrawableSize: CGSize {
         let scale = guestDisplayScale
@@ -67,7 +68,7 @@ class GuestTouchView: UIView {
     }
 
     private func reportSafeAreaInsets() {
-        guard window != nil else { return }
+        guard guestGeometryActive, window != nil else { return }
         let scale = guestDisplayScale
         let edges = safeAreaInsets
         kudroid_set_safe_area_insets(Int32((edges.left * scale).rounded()),
@@ -180,6 +181,7 @@ class GlobalMetalView: GuestTouchView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard guestGeometryActive else { return }
         if let metalLayer = self.layer as? CAMetalLayer {
             let scale = guestDisplayScale
             metalLayer.contentsScale = scale
@@ -197,16 +199,47 @@ class GlobalMetalView: GuestTouchView {
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate {
-    static var orientationLock = UIInterfaceOrientationMask.all
+    static var guestRunnerActive = false
+    static var nativeSandboxActive = false
+    static var guestOrientationActive: Bool { guestRunnerActive || nativeSandboxActive }
+
+    static func guestOrientationMask(_ requested: Int32) -> UIInterfaceOrientationMask {
+        switch requested {
+        case 0, 6, 8, 11: return .landscape
+        case 1, 7, 9, 12: return .portrait
+        default: return .allButUpsideDown
+        }
+    }
+
+    static func restorePortraitIfIdle() {
+        DispatchQueue.main.async {
+            guard !guestOrientationActive else { return }
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .filter { $0.activationState == .foregroundActive }
+            if #available(iOS 16.0, *) {
+                for scene in scenes {
+                    for window in scene.windows {
+                        window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+                    }
+                }
+            }
+            UIViewController.attemptRotationToDeviceOrientation()
+            if #available(iOS 16.0, *) {
+                for scene in scenes where scene.interfaceOrientation != .portrait {
+                    scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in
+                        NSLog("[Orientation] Could not restore portrait: %@", error.localizedDescription)
+                    }
+                }
+            } else {
+                UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
+            }
+        }
+    }
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        let req = kudroid_get_requested_orientation()
-        if req == 0 || req == 6 || req == 8 || req == 11 {
-            return .landscape
-        } else if req == 1 || req == 7 || req == 9 || req == 12 {
-            return .portrait
-        }
-        return AppDelegate.orientationLock
+        guard AppDelegate.guestOrientationActive else { return .portrait }
+        return AppDelegate.guestOrientationMask(kudroid_get_requested_orientation())
     }
 }
 
@@ -243,6 +276,7 @@ struct KuDroidApp: App {
         } else if !StandaloneConfiguration.isStandalone {
             setupLogDir()
         }
+        kudroid_log_vm_startup_probe()
         IOSDiagnostics.shared.start()
         IOSDiagnostics.shared.applicationPhase("app-init")
         activateAudioSession()
@@ -372,6 +406,15 @@ struct KuDroidApp: App {
             }
             .onReceive(installer.$busy) { busy in
                 session.libraryBusy = busy || session.libraryDeletionInProgress
+            }
+            .onChange(of: session.isSoRunning) { running in
+                AppDelegate.nativeSandboxActive = running
+                SharedMetalContainer.shared.view.guestGeometryActive = running
+                if running {
+                    kudroid_notify_orientation_change(orientation: kudroid_get_requested_orientation())
+                } else {
+                    AppDelegate.restorePortraitIfIdle()
+                }
             }
             .onAppear {
                 if !StandaloneConfiguration.isStandalone { dataReset.processStartup() }

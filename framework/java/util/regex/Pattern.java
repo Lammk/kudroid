@@ -703,6 +703,8 @@ public final class Pattern implements Serializable {
                     } else {
                         q = new DotAllQuantifierSet(term, last, quant);
                     }
+                } else if (term instanceof CharacterClassSet) {
+                    q = new CharacterClassQuantifierSet((CharacterClassSet) term, last, quant);
                 } else {
                     q = new GroupQuantifierSet(term, last, quant);
                 }

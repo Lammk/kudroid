@@ -9,6 +9,21 @@ public class ConcurrentHashMap<K, V> extends java.util.HashMap<K, V> {
         super(initialCapacity);
     }
 
+    public ConcurrentHashMap(int initialCapacity, float loadFactor, int concurrencyLevel) {
+        super(checkedCapacity(initialCapacity, loadFactor, concurrencyLevel), loadFactor);
+    }
+
+    private static int checkedCapacity(int initialCapacity, float loadFactor, int concurrencyLevel) {
+        if (initialCapacity < 0 || !(loadFactor > 0.0f) || concurrencyLevel <= 0) {
+            throw new IllegalArgumentException();
+        }
+        // Prevent overflow while the backing table rounds up to a power of two.
+        if (initialCapacity > (1 << 30)) {
+            throw new OutOfMemoryError("Required array size too large");
+        }
+        return initialCapacity;
+    }
+
     public ConcurrentHashMap(java.util.Map<? extends K, ? extends V> m) {
         super(m);
     }

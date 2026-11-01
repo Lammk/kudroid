@@ -58,6 +58,15 @@ int kudroid_export_archive(const char* directory, const char* output, char** err
 
 int kudroid_is_jit_enabled(void);
 
+/// Replay the constructor-time reservation diagnostic after logs initialize.
+void kudroid_log_vm_startup_probe(void);
+/// Test and release a full reservation in normal execution context.
+void kudroid_probe_virtual_memory(const char* phase);
+/// Record VM bounds and gaps without changing any mappings.
+void kudroid_log_virtual_memory_state(const char* phase);
+/// Inspect queued trap pointers from a normal diagnostic thread.
+void kudroid_drain_trap_diagnostics(void);
+
 /// set and get required screen orientation from Activity (0=Landscape, 1=Portrait, -1=Unspecified)
 void kudroid_set_requested_orientation(int orientation);
 int kudroid_get_requested_orientation(void);

@@ -16,6 +16,7 @@
 #include "dex/dex_file_loader.h"
 #include "dex/modifiers.h"
 #include "dex/signature.h"
+#include "dex/standard_dex_file.h"
 
 namespace kudroid {
 namespace kuart {
@@ -136,6 +137,68 @@ bool DexClassLinker::AddDexFile(const uint8_t* bytes, size_t size,
     }
     if (boot_class_path) boot_dex_files_.insert(dex_file.get());
     dex_files_.push_back(std::move(dex_file));
+    return true;
+}
+
+bool DexClassLinker::AddOwnedDexFiles(std::vector<std::vector<uint8_t>> buffers,
+                                      std::string* error_msg) {
+    std::lock_guard<std::recursive_mutex> load_lock(class_load_mutex_);
+    std::vector<std::unique_ptr<const art::DexFile>> pending;
+    const art::DexFileLoader loader;
+    auto fail = [&](const std::string& error) {
+        if (error_msg != nullptr) *error_msg = error;
+        return false;
+    };
+    if (buffers.empty()) return fail("No DEX buffers supplied");
+    for (const auto& bytes : buffers) {
+        if (bytes.size() < sizeof(art::DexFile::Header) ||
+            !art::StandardDexFile::IsMagicValid(bytes.data()) ||
+            !art::StandardDexFile::IsVersionValid(bytes.data())) {
+            return fail("Invalid, truncated or unsupported DEX header");
+        }
+        art::DexFile::Header header;
+        std::memcpy(&header, bytes.data(), sizeof(header));
+        auto fits = [&](uint32_t offset, uint32_t count, size_t width) {
+            return offset <= bytes.size() && count <= (bytes.size() - offset) / width;
+        };
+        // Bound constructor-time section reads before invoking the full verifier.
+        if (header.file_size_ != bytes.size() || header.header_size_ != sizeof(header) ||
+            header.endian_tag_ != art::DexFile::kDexEndianConstant ||
+            !fits(header.string_ids_off_, header.string_ids_size_, sizeof(art::dex::StringId)) ||
+            !fits(header.type_ids_off_, header.type_ids_size_, sizeof(art::dex::TypeId)) ||
+            !fits(header.proto_ids_off_, header.proto_ids_size_, sizeof(art::dex::ProtoId)) ||
+            !fits(header.field_ids_off_, header.field_ids_size_, sizeof(art::dex::FieldId)) ||
+            !fits(header.method_ids_off_, header.method_ids_size_, sizeof(art::dex::MethodId)) ||
+            !fits(header.class_defs_off_, header.class_defs_size_, sizeof(art::dex::ClassDef)) ||
+            !fits(header.data_off_, header.data_size_, 1) ||
+            header.map_off_ == 0 || header.map_off_ % alignof(uint32_t) != 0 ||
+            !fits(header.map_off_, 1, sizeof(uint32_t))) {
+            return fail("Invalid DEX section bounds");
+        }
+        uint32_t map_count;
+        std::memcpy(&map_count, bytes.data() + header.map_off_, sizeof(map_count));
+        if (map_count > (bytes.size() - header.map_off_ - sizeof(uint32_t)) /
+                            sizeof(art::dex::MapItem)) {
+            return fail("Truncated DEX map list");
+        }
+        for (uint32_t i = 0; i < map_count; ++i) {
+            art::dex::MapItem item;
+            std::memcpy(&item, bytes.data() + header.map_off_ + sizeof(uint32_t) +
+                                  i * sizeof(item), sizeof(item));
+            if (item.offset_ >= bytes.size()) return fail("Invalid DEX map item offset");
+        }
+        std::string error;
+        const std::string location = "memory:" + std::to_string(dex_files_.size() + pending.size());
+        auto dex = loader.Open(bytes.data(), bytes.size(), location, header.checksum_, nullptr,
+                               /*verify=*/true, /*verify_checksum=*/true, &error);
+        if (!dex) return fail(error);
+        pending.push_back(std::move(dex));
+    }
+    // Reserve both registries before publishing; vector moves preserve byte addresses.
+    owned_dex_bytes_.reserve(owned_dex_bytes_.size() + buffers.size());
+    dex_files_.reserve(dex_files_.size() + pending.size());
+    for (auto& bytes : buffers) owned_dex_bytes_.push_back(std::move(bytes));
+    for (auto& dex : pending) dex_files_.push_back(std::move(dex));
     return true;
 }
 

@@ -6,4 +6,5 @@ entitlementsPath: ../entitlements.plist
 resources:
   - ../entitlements.plist
   - Resources/runtime
+  - Resources/runtime-adapters
   - Resources/system

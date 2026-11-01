@@ -69,6 +69,7 @@ public abstract class Context {
     public static final String MEDIA_SESSION_SERVICE = "media_session";
     public static final String GRAMMATICAL_INFLECTION_SERVICE = "grammatical_inflection";
     public static final String UI_MODE_SERVICE = "uimode";
+    public static final String STORAGE_SERVICE = "storage";
 
     public abstract AssetManager getAssets();
     public abstract Resources getResources();
@@ -332,6 +333,7 @@ public abstract class Context {
         // VibratorManager wraps a Vibrator on Android 12+; apps target either.
         if (name.equals(VIBRATOR_MANAGER_SERVICE)) return new SystemVibrator();
         if (name.equals(UI_MODE_SERVICE)) return new android.app.UiModeManager();
+        if (name.equals(STORAGE_SERVICE)) return new android.os.storage.StorageManager();
 
         reportUnknownService(name);
         return null;
@@ -355,7 +357,7 @@ public abstract class Context {
             KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
             APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
             INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
-            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE, UI_MODE_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE, UI_MODE_SERVICE, STORAGE_SERVICE,
         };
 
         for (int i = 0; i < candidates.length; ++i) {
@@ -387,7 +389,7 @@ public abstract class Context {
             KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
             APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
             INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
-            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE, UI_MODE_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE, UI_MODE_SERVICE, STORAGE_SERVICE,
         };
         for (int i = 0; i < candidates.length; ++i) {
             final Object service = getSystemService(candidates[i]);

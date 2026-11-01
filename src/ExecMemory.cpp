@@ -44,7 +44,7 @@ constexpr size_t kProbeSize = 4096;
 
 // Virtual reservation for the prepared exec arena. Only touched pages commit, so
 // the size covers every guest exec prefix plus JIT code at no resident cost.
-constexpr size_t kArenaSize = 256ull << 20;
+constexpr size_t kArenaSize = 512ull << 20;
 constexpr size_t kGuestArenaSize = 64ull << 20;
 
 // Defined below, used by the arena helpers above them.

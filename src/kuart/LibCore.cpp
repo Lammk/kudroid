@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <random>
 #include <set>
 #include <string>
@@ -623,7 +624,8 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             interp->ThrowException("Ljava/lang/ClassNotFoundException;", class_name);
             return true;
         }
-        interp->EnsureInitialized(klass);
+        const bool initialize = num_args < 3 || args[1].i != 0;
+        if (initialize && !interp->EnsureInitialized(klass)) return true;
         result->l = interp->linker()->GetClassObject(klass);
         return true;
     }
@@ -776,7 +778,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             interp->ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
             return true;
         }
-        interp->EnsureInitialized(klass);
+        if (!interp->EnsureInitialized(klass)) return true;
         DexObject* new_obj = linker->AllocObject(klass);
         if (new_obj == nullptr) {
             interp->ThrowException("Ljava/lang/OutOfMemoryError;", "AllocObject failed");
@@ -2655,6 +2657,10 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
                          size_t num_args, DexValue* result) {
     std::string path = RemapJavaPath(GetFilePath(args[0]));
     if (path.empty()) {
+        if (std::strcmp(name, "createNewFile") == 0 || std::strcmp(name, "createNewFile0") == 0) {
+            interp->ThrowException("Ljava/io/IOException;", "Empty file path");
+            return true;
+        }
         // Every native here returns boolean/long/array; zero is the right answer
         // for an unusable path in all of them.
         *result = DexValue::Int(0);
@@ -2769,17 +2775,18 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
         *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
     }
-    if (std::strcmp(name, "createNewFile") == 0) {
+    if (std::strcmp(name, "createNewFile") == 0 || std::strcmp(name, "createNewFile0") == 0) {
         int fd = -1;
+        int error = 0;
         {
             VmLockRelease unlocked;
             fd = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
+            if (fd < 0) error = errno;
+            else close(fd);
         }
-        if (fd >= 0) {
-            close(fd);
-            *result = DexValue::Int(1);
-        } else {
-            *result = DexValue::Int(0);
+        *result = DexValue::Int(fd >= 0 ? 1 : 0);
+        if (fd < 0 && error != EEXIST) {
+            interp->ThrowException("Ljava/io/IOException;", std::strerror(error));
         }
         return true;
     }
@@ -4549,8 +4556,10 @@ bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexVa
         loaded = g_load_lib_cb(lib_name.c_str());
     }
     if (!loaded) {
-        interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;",
-                               std::string("Couldn't load ") + lib_name);
+        if (!interp->HasPendingException()) {
+            interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;",
+                                   std::string("Couldn't load ") + lib_name);
+        }
         return true;
     }
     return true;
@@ -4571,6 +4580,39 @@ bool Invoke_dalvik_system_BaseDexClassLoader(Interpreter* interp, const char* na
     char path[2048];
     if (kudroid_find_native_library(lib, path, sizeof(path)) != 0) {
         result->l = reinterpret_cast<DexObject*>(interp->linker()->NewString(path));
+    }
+    return true;
+}
+
+bool Invoke_dalvik_system_InMemoryDexClassLoader(Interpreter* interp, const char* name,
+                                                const DexValue* args, size_t num_args,
+                                                DexValue* result) {
+    if (std::strcmp(name, "registerDexBuffers") != 0) return false;
+    result->l = nullptr;
+    auto* arrays = num_args > 0 ? reinterpret_cast<DexArray*>(args[0].l) : nullptr;
+    if (arrays == nullptr) {
+        interp->ThrowException("Ljava/lang/NullPointerException;", "null DEX buffers");
+        return true;
+    }
+    try {
+        std::vector<std::vector<uint8_t>> buffers;
+        buffers.reserve(arrays->length);
+        for (int32_t i = 0; i < arrays->length; ++i) {
+            auto* bytes = reinterpret_cast<DexArray*>(arrays->Get<DexObject*>(i));
+            if (bytes == nullptr) {
+                interp->ThrowException("Ljava/lang/NullPointerException;", "null DEX buffer");
+                return true;
+            }
+            buffers.emplace_back(bytes->Data(), bytes->Data() + bytes->length);
+        }
+        std::string error;
+        if (!interp->linker()->AddOwnedDexFiles(std::move(buffers), &error)) {
+            result->l = interp->linker()->NewString(error);
+            if (result->l == nullptr)
+                interp->ThrowException("Ljava/lang/OutOfMemoryError;", "DEX error allocation failed");
+        }
+    } catch (const std::bad_alloc&) {
+        interp->ThrowException("Ljava/lang/OutOfMemoryError;", "DEX buffer allocation failed");
     }
     return true;
 }
@@ -5299,6 +5341,8 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         }
         return Invoke_dalvik_system_BaseDexClassLoader(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Ldalvik/system/InMemoryDexClassLoader;") == 0)
+        return Invoke_dalvik_system_InMemoryDexClassLoader(interp, name, args, num_args, result);
 
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0)
@@ -5358,6 +5402,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     }
     if (std::strcmp(desc, "Llibcore/io/KuZlib;") == 0) {
         return Invoke_libcore_io_KuZlib(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Llibcore/io/KuCrypto;") == 0) {
+        return Invoke_libcore_io_KuCrypto(interp, name, args, num_args, result);
     }
     // AudioTrack is the Java audio path used by FMOD.
     if (std::strcmp(desc, "Landroid/media/MediaPlayer;") == 0) {
@@ -5433,6 +5480,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
     return (std::strncmp(desc, "Ljava/", 6) == 0 ||
             std::strcmp(desc, "Lsun/misc/Unsafe;") == 0 ||
             std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0 ||
+            std::strcmp(desc, "Ldalvik/system/InMemoryDexClassLoader;") == 0 ||
             std::strcmp(desc, "Landroid/util/Log;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/Canvas;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0 ||
@@ -5454,6 +5502,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Llibcore/io/Memory;") == 0 ||
             std::strcmp(desc, "Llibcore/io/KuTls;") == 0 ||
             std::strcmp(desc, "Llibcore/io/KuZlib;") == 0 ||
+            std::strcmp(desc, "Llibcore/io/KuCrypto;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/Surface;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||

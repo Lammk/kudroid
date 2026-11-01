@@ -89,7 +89,7 @@ package java.util.regex;
  * from the parent range.
  * This class represents the parent range split in such a manner.
  */
-class CompositeRangeSet extends JointSet {
+class CompositeRangeSet extends CharacterClassSet {
 
     //range without surrogates
     AbstractSet withoutSurrogates;
@@ -117,12 +117,20 @@ class CompositeRangeSet extends JointSet {
         return this.next;
     }
     
-    public int matches(int stringIndex, CharSequence testString,
+    int accepts(int stringIndex, CharSequence testString,
             MatchResultImpl matchResult) {
-        int shift = withoutSurrogates.matches(stringIndex, testString, matchResult);
+        int shift;
+        if (withoutSurrogates instanceof CharacterClassSet) {
+            shift = ((CharacterClassSet) withoutSurrogates).accepts(stringIndex, testString, matchResult);
+        } else if (stringIndex < matchResult.getRightBound()) {
+            shift = ((LeafSet) withoutSurrogates).accepts(stringIndex, testString);
+        } else {
+            matchResult.hitEnd = true;
+            shift = -1;
+        }
         
         if (shift < 0) {
-            shift = withSurrogates.matches(stringIndex, testString, matchResult);
+            shift = ((CharacterClassSet) withSurrogates).accepts(stringIndex, testString, matchResult);
         }
         
         if (shift >= 0) {

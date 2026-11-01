@@ -1,10 +1,14 @@
 #include "kudroid/FlutterRuntime.h"
+#include "../third_party/picojson/picojson.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -23,12 +27,13 @@
 namespace kudroid {
 namespace {
 
-constexpr std::string_view kOriginalBuildId = "fb5eaead4cf4256da528a8ebbd653cdf89ec99bc";
-constexpr std::string_view kCandidateBuildId = "d512a1385f6d73f28f618369888b65cef4fe6629";
-constexpr std::string_view kCandidateSha256 = "df2715a416aac8dbcd63d81bc2171246af378e8dd9a92d2ece2f0b4489f6e3f1";
-constexpr std::string_view kSnapshotHash = "830f4f59e7969c70b595182826435c19";
-constexpr std::string_view kFeatures = "product no-code_comments no-dwarf_stack_traces_mode "
-    "dedup_instructions no-tsan no-msan arm64 android compressed-pointers";
+struct Snapshot {
+    std::string hash, features;
+};
+struct RuntimeRecord {
+    std::string version, path, originalBuildId, candidateBuildId, candidateSha256;
+    Snapshot vm, isolate;
+};
 
 struct Header {
     std::uint8_t ident[16];
@@ -123,7 +128,7 @@ public:
         return {};
     }
 
-    bool snapshot(std::string_view name) const {
+    bool snapshot(std::string_view name, Snapshot& result) const {
         Symbol symbol {};
         if (!findSymbol(name, symbol) || symbol.size < 53) return false;
         std::uint64_t offset = 0;
@@ -134,9 +139,11 @@ public:
             magic != 0xdcdcf5f5 || kind != 3 || length < 49 ||
             std::uint64_t(length) > symbol.size - 4) return false;
         const std::uint64_t extent = std::uint64_t(length) + 4;
-        if (std::memcmp(data_ + offset + 20, kSnapshotHash.data(), kSnapshotHash.size()) != 0) return false;
         std::string_view features;
-        return stringAt(offset + 52, extent - 52, features) && features == kFeatures;
+        if (!stringAt(offset + 52, extent - 52, features) || features.empty() || features.size() > 1024) return false;
+        result.hash.assign(reinterpret_cast<const char*>(data_ + offset + 20), 32);
+        result.features.assign(features);
+        return true;
     }
 
     std::string sha256() const {
@@ -217,42 +224,150 @@ private:
     bool valid_ = false;
 };
 
-} // namespace
+bool hexField(const std::string& value, std::size_t size) {
+    return value.size() == size && value.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
 
-bool isConstrainedFlutterEligible(const std::string& originalPath,
-                                 const std::string& candidatePath,
-                                 std::string& reason) {
-    ElfFile original(originalPath);
-    if (!original.valid() || original.buildId() != kOriginalBuildId) {
-        reason = "unsupported original engine";
-        return false;
+bool textField(const picojson::value& value, const char* name, std::string& result) {
+    const auto& field = value.get(name);
+    if (!field.is<std::string>()) return false;
+    result = field.get<std::string>();
+    return !result.empty() && result.size() <= 1024 && result.find('\0') == std::string::npos;
+}
+
+bool readRecord(const picojson::value& value, RuntimeRecord& record) {
+    if (!value.is<picojson::object>() || !value.get("static_verified").is<bool>() ||
+        !value.get("static_verified").get<bool>()) return false;
+    std::string target;
+    return textField(value, "flutter_version", record.version) &&
+        textField(value, "path", record.path) &&
+        textField(value, "target", target) && target == "android-arm64-release" &&
+        textField(value, "original_build_id", record.originalBuildId) && hexField(record.originalBuildId, 40) &&
+        textField(value, "candidate_build_id", record.candidateBuildId) && hexField(record.candidateBuildId, 40) &&
+        textField(value, "candidate_sha256", record.candidateSha256) && hexField(record.candidateSha256, 64) &&
+        textField(value, "vm_snapshot_hash", record.vm.hash) && hexField(record.vm.hash, 32) &&
+        textField(value, "vm_snapshot_features", record.vm.features) &&
+        textField(value, "isolate_snapshot_hash", record.isolate.hash) && hexField(record.isolate.hash, 32) &&
+        textField(value, "isolate_snapshot_features", record.isolate.features);
+}
+
+bool readCatalog(const std::string& directory, std::vector<RuntimeRecord>& records) {
+    std::ifstream stream(std::filesystem::path(directory) / "manifest.json", std::ios::binary);
+    if (!stream) return false;
+    std::string json;
+    char byte;
+    int depth = 0;
+    bool quoted = false, escaped = false;
+    while (stream.get(byte)) {
+        if (json.size() >= 65536) return false;
+        json.push_back(byte);
+        if (escaped) { escaped = false; continue; }
+        if (quoted && byte == '\\') { escaped = true; continue; }
+        if (byte == '"') { quoted = !quoted; continue; }
+        if (quoted) continue;
+        if ((byte == '{' || byte == '[') && ++depth > 16) return false;
+        if ((byte == '}' || byte == ']') && --depth < 0) return false;
     }
-    ElfFile app((std::filesystem::path(originalPath).parent_path() / "libapp.so").string());
-    if (!app.snapshot("_kDartVmSnapshotData") || !app.snapshot("_kDartIsolateSnapshotData")) {
-        reason = "incompatible or missing AOT snapshot";
-        return false;
+    if (stream.bad() || quoted || escaped || depth != 0) return false;
+    picojson::value catalog;
+    std::string error;
+    const auto end = picojson::parse(catalog, json.begin(), json.end(), &error);
+    if (!error.empty() || std::any_of(end, json.end(), [](char ch) {
+            return ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n';
+        }) || !catalog.is<picojson::object>() || !catalog.get("schema_version").is<double>() ||
+        catalog.get("schema_version").get<double>() != 1 ||
+        !catalog.get("engines").is<picojson::array>()) return false;
+    const auto& entries = catalog.get("engines").get<picojson::array>();
+    if (entries.empty() || entries.size() > 256) return false;
+    for (const auto& entry : entries) {
+        RuntimeRecord record;
+        if (readRecord(entry, record)) records.push_back(std::move(record));
     }
-    ElfFile candidate(candidatePath);
-    if (!candidate.valid() || candidate.buildId() != kCandidateBuildId ||
-        candidate.sha256() != kCandidateSha256) {
-        reason = "missing or unverified runtime asset";
-        return false;
-    }
-    reason = "Flutter 3.32.5 Android ARM64 product compressed-pointers";
     return true;
 }
 
-std::string bundledFlutterRuntimePath() {
+std::string containedCandidate(const std::string& directory, const std::string& relative) {
+    namespace fs = std::filesystem;
+    const fs::path path(relative);
+    if (path.is_absolute() || path.filename() != "libflutter.so" || relative.find('\\') != std::string::npos) return {};
+    for (const auto& part : path) if (part == ".." || part == ".") return {};
+    std::error_code error;
+    const fs::path root = fs::canonical(directory, error);
+    if (error) return {};
+    const fs::path candidate = fs::canonical(root / path, error);
+    if (error) return {};
+    auto left = root.begin(), right = candidate.begin();
+    for (; left != root.end(); ++left, ++right) {
+        if (right == candidate.end() || *left != *right) return {};
+    }
+    return right != candidate.end() ? candidate.string() : std::string();
+}
+
+} // namespace
+
+std::string selectConstrainedFlutterRuntime(const std::string& originalPath,
+                                           const std::string& runtimeDirectory,
+                                           std::string& reason) {
+    std::vector<RuntimeRecord> records;
+    if (runtimeDirectory.empty() || !readCatalog(runtimeDirectory, records)) {
+        reason = "missing or invalid runtime catalog";
+        return {};
+    }
+    ElfFile original(originalPath);
+    const std::string identity = original.buildId();
+    if (!original.valid() || identity.empty()) {
+        reason = "unsupported original engine";
+        return {};
+    }
+    ElfFile app((std::filesystem::path(originalPath).parent_path() / "libapp.so").string());
+    Snapshot vm, isolate;
+    if (!app.snapshot("_kDartVmSnapshotData", vm) || !app.snapshot("_kDartIsolateSnapshotData", isolate)) {
+        reason = "incompatible or missing AOT snapshot";
+        return {};
+    }
+    const RuntimeRecord* match = nullptr;
+    bool knownIdentity = false;
+    for (const auto& record : records) {
+        if (record.originalBuildId != identity) continue;
+        knownIdentity = true;
+        if (record.vm.hash != vm.hash || record.vm.features != vm.features ||
+            record.isolate.hash != isolate.hash || record.isolate.features != isolate.features) continue;
+        if (match) {
+            reason = "ambiguous runtime catalog match";
+            return {};
+        }
+        match = &record;
+    }
+    if (!match) {
+        reason = knownIdentity ? "unsupported AOT snapshot hash or features" : "unsupported original engine";
+        return {};
+    }
+    const std::string path = containedCandidate(runtimeDirectory, match->path);
+    if (path.empty()) {
+        reason = "missing or unsafe runtime asset path";
+        return {};
+    }
+    ElfFile candidate(path);
+    if (!candidate.valid() || candidate.buildId() != match->candidateBuildId ||
+        candidate.sha256() != match->candidateSha256) {
+        reason = "missing or unverified runtime asset";
+        return {};
+    }
+    reason = "Flutter " + match->version + " Android ARM64 " + vm.features;
+    return path;
+}
+
+std::string bundledFlutterRuntimeDirectory() {
 #if defined(__APPLE__)
-    CFURLRef url = CFBundleCopyResourceURL(CFBundleGetMainBundle(), CFSTR("libflutter"),
-                                          CFSTR("so"), CFSTR("runtime"));
+    CFURLRef url = CFBundleCopyResourceURL(CFBundleGetMainBundle(), CFSTR("runtime"),
+                                          nullptr, nullptr);
     if (!url) return {};
     std::array<UInt8, 4096> path {};
     const bool valid = CFURLGetFileSystemRepresentation(url, true, path.data(), path.size());
     CFRelease(url);
     if (valid) return reinterpret_cast<const char*>(path.data());
 #else
-    const char* configured = std::getenv("KUDROID_FLUTTER_RUNTIME");
+    const char* configured = std::getenv("KUDROID_FLUTTER_RUNTIME_DIRECTORY");
     if (configured) return configured;
 #endif
     return {};

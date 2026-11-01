@@ -1,0 +1,32 @@
+{
+  "flutter_version": "3.22.2",
+  "flutter_revision": "761747bfc538b5af34aa0d3fac380f1bc331ec49",
+  "engine_revision": "edd8546116457bdf1c5bdfb13ecb9463d2bb5ed4",
+  "dart_revision": "1a849f91804e73a830844a5bf546a3f7027fc36d",
+  "dart_version": "3.4.3",
+  "original_build_id": "e05edcf1368609668cf1873a167462cbcf923136",
+  "reference_sha256": "b1330995b830364dfbcc37b8c0b54d8820b327bfa96980c5d80b6b1aa23dd677",
+  "candidate_sha256": "5b0929b31a7c44190daa57ab07ec158c9c984cd184924fc28c99972bde350ea0",
+  "candidate_build_id": "e6f2e3fa618bec8f68e5b725767f944759f82ea1",
+  "vm_snapshot_hash": "d20a1be77c3d3c41b2a5accaee1ce549",
+  "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+  "isolate_snapshot_hash": "d20a1be77c3d3c41b2a5accaee1ce549",
+  "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode no-lazy_dispatchers dedup_instructions no-tsan no-asserts arm64 android compressed-pointers null-safety",
+  "missing_exports": [],
+  "extra_dependencies": [],
+  "extra_imports": [
+    "__vsprintf_chk",
+    "exit",
+    "vprintf"
+  ],
+  "reviewed_extra_imports": {
+    "__vsprintf_chk": "bionic___vsprintf_chk",
+    "exit": "host C library process exit",
+    "vprintf": "bionic_vprintf"
+  },
+  "unreviewed_imports": [],
+  "missing_jni_signatures": [],
+  "preflight_passed": true,
+  "device_verified": false,
+  "errors": []
+}

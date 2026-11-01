@@ -81,5 +81,8 @@ public final class KuNet {
     /** Writes the host name for addr into out; returns its length, 0 when there is none. */
     public static native int reverse(byte[] addr, byte[] out);
     public static native int hostName(byte[] out);
+    public static native String[] interfaceNames();
+    // Rows contain length, prefix, broadcast flag, scope ID, address and IPv4 broadcast.
+    public static native byte[][] interfaceAddresses(String name);
     public static native int joinGroup(int fd, byte[] group, boolean join);
 }

@@ -54,10 +54,8 @@ public final class Class<T> implements java.lang.reflect.Type, java.lang.reflect
 
     public static native Class<?> forName(String className) throws ClassNotFoundException;
 
-    public static Class<?> forName(String className, boolean initialize, ClassLoader loader)
-            throws ClassNotFoundException {
-        return forName(className);
-    }
+    public static native Class<?> forName(String className, boolean initialize, ClassLoader loader)
+            throws ClassNotFoundException;
 
     /**
      * The Class object for a primitive type, named the way Java source names it

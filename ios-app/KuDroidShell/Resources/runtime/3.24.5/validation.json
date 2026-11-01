@@ -1,0 +1,32 @@
+{
+  "flutter_version": "3.24.5",
+  "flutter_revision": "dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668",
+  "engine_revision": "a18df97ca57a249df5d8d68cd0820600223ce262",
+  "dart_revision": "88c9758ef131d430d8ce595c6bfb4c90574d3ddd",
+  "dart_version": "3.5.4",
+  "original_build_id": "67d6564b8d334123ab2f76cbe8615dc2688a7cf8",
+  "reference_sha256": "0baa710d6b7f7de2f8bcc05aa2950bab2989f3a4c95bc7f7bcc23ce84626ee52",
+  "candidate_sha256": "2e60275f26b6a2bf5dfd7f60b07cf8a8b62ab7457f621dc46f83caf5f5adfacb",
+  "candidate_build_id": "0b1a021e3cb6e23a829fbed751894b06b42bf226",
+  "vm_snapshot_hash": "80a49c7111088100a233b2ae788e1f48",
+  "vm_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+  "isolate_snapshot_hash": "80a49c7111088100a233b2ae788e1f48",
+  "isolate_snapshot_features": "product no-code_comments no-dwarf_stack_traces_mode dedup_instructions no-tsan no-msan arm64 android compressed-pointers",
+  "missing_exports": [],
+  "extra_dependencies": [],
+  "extra_imports": [
+    "__vsprintf_chk",
+    "exit",
+    "vprintf"
+  ],
+  "reviewed_extra_imports": {
+    "__vsprintf_chk": "bionic___vsprintf_chk",
+    "exit": "host C library process exit",
+    "vprintf": "bionic_vprintf"
+  },
+  "unreviewed_imports": [],
+  "missing_jni_signatures": [],
+  "preflight_passed": true,
+  "device_verified": false,
+  "errors": []
+}

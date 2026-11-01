@@ -14,6 +14,10 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <memory>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 
 #include <netdb.h>
 #include <poll.h>
@@ -21,6 +25,8 @@
 #include <unistd.h>
 
 #include "kudroid/kuart/DexObject.h"
+#include "kudroid/kuart/DexClassLinker.h"
+#include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/DexValue.h"
 #include "kudroid/kuart/DexString.h"
 #include "kudroid/kuart/VmLock.h"
@@ -277,7 +283,7 @@ int DoResolve(const std::string& host, DexArray* out) {
 
 }  // namespace
 
-bool Invoke_libcore_io_KuNet(Interpreter* /*interp*/, const char* name, const DexValue* args,
+bool Invoke_libcore_io_KuNet(Interpreter* interp, const char* name, const DexValue* args,
                              size_t num_args, DexValue* result) {
     const auto Is = [&](const char* n) { return std::strcmp(name, n) == 0; };
 
@@ -588,6 +594,79 @@ bool Invoke_libcore_io_KuNet(Interpreter* /*interp*/, const char* name, const De
         const size_t n = std::min(std::strlen(host), static_cast<size_t>(out->length));
         std::memcpy(out->Data(), host, n);
         *result = DexValue::Int(static_cast<int>(n));
+        return true;
+    }
+    if ((Is("interfaceNames") && num_args == 0) ||
+        (Is("interfaceAddresses") && num_args == 1)) {
+        struct ifaddrs* head = nullptr;
+        if (::getifaddrs(&head) != 0) {
+            *result = DexValue::Ref(nullptr);
+            return true;
+        }
+        std::unique_ptr<struct ifaddrs, decltype(&::freeifaddrs)> owned(head, ::freeifaddrs);
+        std::vector<std::string> names;
+        std::vector<std::vector<uint8_t>> rows;
+        const bool want_names = Is("interfaceNames");
+        const std::string requested = want_names ? "" : Utf8(args[0]);
+        for (auto* entry = head; entry; entry = entry->ifa_next) {
+            if (!entry->ifa_name) continue;
+            if (want_names) {
+                if (std::find(names.begin(), names.end(), entry->ifa_name) == names.end())
+                    names.emplace_back(entry->ifa_name);
+                continue;
+            }
+            if (requested != entry->ifa_name || !entry->ifa_addr || !entry->ifa_netmask) continue;
+            const int family = entry->ifa_addr->sa_family;
+            if ((family != AF_INET && family != AF_INET6) || entry->ifa_netmask->sa_family != family) continue;
+            const size_t length = family == AF_INET ? 4 : 16;
+            auto address_bytes = [family](const struct sockaddr* address) -> const uint8_t* {
+                if (family == AF_INET)
+                    return reinterpret_cast<const uint8_t*>(&reinterpret_cast<const sockaddr_in*>(address)->sin_addr);
+                return reinterpret_cast<const uint8_t*>(&reinterpret_cast<const sockaddr_in6*>(address)->sin6_addr);
+            };
+            const uint8_t* mask = address_bytes(entry->ifa_netmask);
+            unsigned prefix = 0;
+            bool zero_seen = false, valid = true;
+            for (size_t i = 0; i < length; ++i) {
+                for (int bit = 7; bit >= 0; --bit) {
+                    if (mask[i] & (1u << bit)) { ++prefix; if (zero_seen) valid = false; }
+                    else zero_seen = true;
+                }
+            }
+            if (!valid) continue;
+            std::vector<uint8_t> row(7 + length + 4, 0);
+            row[0] = static_cast<uint8_t>(length);
+            row[1] = static_cast<uint8_t>(prefix);
+            if (family == AF_INET6) {
+                const uint32_t scope = reinterpret_cast<const sockaddr_in6*>(entry->ifa_addr)->sin6_scope_id;
+                for (unsigned i = 0; i < 4; ++i) row[3 + i] = static_cast<uint8_t>(scope >> (24 - 8 * i));
+            }
+            std::memcpy(row.data() + 7, address_bytes(entry->ifa_addr), length);
+            if (family == AF_INET && (entry->ifa_flags & IFF_BROADCAST) && entry->ifa_broadaddr &&
+                entry->ifa_broadaddr->sa_family == AF_INET) {
+                row[2] = 1;
+                std::memcpy(row.data() + 7 + length, address_bytes(entry->ifa_broadaddr), 4);
+            }
+            rows.push_back(std::move(row));
+        }
+        auto* linker = interp->linker();
+        auto* array_class = linker->FindClass(want_names ? "[Ljava/lang/String;" : "[[B");
+        auto* byte_class = want_names ? nullptr : linker->FindClass("[B");
+        DexArray* array = array_class ? linker->AllocArray(array_class, static_cast<int32_t>(
+            want_names ? names.size() : rows.size())) : nullptr;
+        if (array) {
+            auto** values = reinterpret_cast<DexObject**>(array->Data());
+            for (int32_t i = 0; i < array->length; ++i) {
+                if (want_names) values[i] = linker->InternString(names[i]);
+                else {
+                    DexArray* row = byte_class ? linker->AllocArray(byte_class, static_cast<int32_t>(rows[i].size())) : nullptr;
+                    if (!row) { *result = DexValue::Ref(nullptr); return true; }
+                    std::memcpy(row->Data(), rows[i].data(), rows[i].size());
+                    values[i] = row;
+                }
+            }
+        }
+        *result = DexValue::Ref(array);
         return true;
     }
     if (Is("joinGroup") && num_args >= 3) {

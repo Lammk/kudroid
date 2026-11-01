@@ -11,14 +11,11 @@ import subprocess
 from pathlib import Path
 
 
-SNAPSHOT_HASH = "830f4f59e7969c70b595182826435c19"
-REFERENCE_BUILD_ID = "fb5eaead4cf4256da528a8ebbd653cdf89ec99bc"
-FEATURES = ("product no-code_comments no-dwarf_stack_traces_mode "
-            "dedup_instructions no-tsan no-msan arm64 android compressed-pointers")
 REVIEWED_IMPORTS = {
     "__vsprintf_chk": "bionic___vsprintf_chk",
     "vprintf": "bionic_vprintf",
     "exit": "host C library process exit",
+    "log10": "host libm double(double) via kSyscallSymbols",
 }
 
 
@@ -99,21 +96,39 @@ def main():
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--version", default="3.32.5")
+    parser.add_argument("--reference-metadata", type=Path)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     reference = inspect(args.reference)
     candidate = inspect(args.candidate)
     app = inspect(args.snapshot)
     errors = []
-    if reference["build_id"] != REFERENCE_BUILD_ID:
+    pins = json.loads((Path(__file__).parent / "versions.json").read_text())
+    pin = next(p for p in pins if p["flutter_tag"] == args.version)
+    if reference["build_id"] != pin["reference_build_id"] or reference["sha256"] != pin["reference_sha256"]:
         errors.append("Reference is outside the pinned engine family")
+    if args.version != "3.32.5":
+        metadata = json.loads((args.reference_metadata or args.reference.parent / "reference.json").read_text())
+        for key in ("flutter_revision", "engine_revision", "dart_revision", "dart_version"):
+            if metadata[key] != pin[key]:
+                errors.append("Official reference metadata revision differs: " + key)
+        if reference["build_id"] != metadata["reference_build_id"] or reference["sha256"] != metadata["reference_sha256"]:
+            errors.append("Reference differs from the downloaded official artifact")
+    snapshots = {}
     for name in ("_kDartVmSnapshotData", "_kDartIsolateSnapshotData"):
         version, features = snapshot_features(app, name)
-        if version != SNAPSHOT_HASH or features != FEATURES:
-            errors.append(f"{name}: snapshot version or features differ")
+        snapshots[name] = (version, features)
+        if not re.fullmatch("[0-9a-f]{32}", version) or not features.startswith("product ") or not {"arm64", "android", "compressed-pointers"} <= set(features.split()):
+            errors.append(f"{name}: unsupported snapshot version or target features")
+        prefix = "vm" if name == "_kDartVmSnapshotData" else "isolate"
+        if version != pin[prefix + "_snapshot_hash"] or features != pin[prefix + "_snapshot_features"]:
+            errors.append(f"{name}: snapshot version or features differ from the pinned release")
     for label, engine in (("reference", reference), ("candidate", candidate)):
-        if SNAPSHOT_HASH.encode() + b"\x00" not in engine["data"]:
-            errors.append(f"{label}: snapshot hash missing")
-        if b"3.8.1 (stable)" not in engine["data"] or b'"android_arm64"' not in engine["data"]:
+        for version, _ in snapshots.values():
+            if version.encode() + b"\x00" not in engine["data"]:
+                errors.append(f"{label}: snapshot hash missing")
+        if (pin["dart_version"] + " (stable)").encode() not in engine["data"] or b'"android_arm64"' not in engine["data"]:
             errors.append(f"{label}: Dart platform/version differs")
         if "JNI_OnLoad" not in engine["exports"]:
             errors.append(f"{label}: JNI_OnLoad missing")
@@ -132,10 +147,18 @@ def main():
         errors.append("Candidate adds imported symbols requiring shim review")
     if missing_signatures:
         errors.append("Candidate removes JNI signature strings")
-    print(json.dumps({
+    report = {
+        "flutter_version": args.version,
+        "flutter_revision": pin["flutter_revision"],
+        "engine_revision": pin["engine_revision"],
+        "dart_revision": pin["dart_revision"], "dart_version": pin["dart_version"],
+        "original_build_id": reference["build_id"], "reference_sha256": reference["sha256"],
         "candidate_sha256": candidate["sha256"],
         "candidate_build_id": candidate["build_id"],
-        "snapshot_hash": SNAPSHOT_HASH, "snapshot_features": FEATURES,
+        "vm_snapshot_hash": snapshots["_kDartVmSnapshotData"][0],
+        "vm_snapshot_features": snapshots["_kDartVmSnapshotData"][1],
+        "isolate_snapshot_hash": snapshots["_kDartIsolateSnapshotData"][0],
+        "isolate_snapshot_features": snapshots["_kDartIsolateSnapshotData"][1],
         "missing_exports": missing_exports, "extra_dependencies": extra_dependencies,
         "extra_imports": extra_imports,
         "reviewed_extra_imports": {name: REVIEWED_IMPORTS[name] for name in extra_imports
@@ -144,7 +167,11 @@ def main():
         "missing_jni_signatures": sorted(s.decode("ascii", "replace") for s in missing_signatures),
         "preflight_passed": not errors, "device_verified": False,
         "errors": errors,
-    }, indent=2))
+    }
+    encoded = json.dumps(report, indent=2) + "\n"
+    if args.output:
+        args.output.write_text(encoded)
+    print(encoded, end="")
     return bool(errors)
 
 

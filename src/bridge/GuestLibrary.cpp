@@ -5,6 +5,7 @@
 #include "GuestLibrary.h"
 #include "CrashInternal.h"
 #include "kudroid/KuArtRuntime.h"
+#include "kudroid/kuart/JniLibraryRegistry.h"
 #include "kudroid/ResourceTable.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
@@ -226,6 +227,46 @@ extern "C" int kudroid_find_native_library(const char* name, char* out,
     return 0;
 }
 
+static int loadGuestJniLibrary(const char* name) {
+    char path[4096];
+    if (!kudroid_find_native_library(name, path, sizeof(path))) return 0;
+    auto& manager = globalLibraryManager();
+    if (!manager.loadRecursive(path)) return 0;
+    static kudroid::kuart::JniLibraryRegistry registry;
+    return registry.Initialize(path, [&]() {
+        void* symbol = manager.resolveSymbolInLib(path, "JNI_OnLoad");
+        if (!symbol) return true;
+        JavaVM* vm = kuart_get_javavm();
+        if (!vm) return false;
+        JNIEnv* env = nullptr;
+        if (kuart_get_env(vm, reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) return false;
+        bionic_init_main_thread_tls();
+        char message[4608];
+        std::snprintf(message, sizeof(message), "[kudroid_core] Invoking JNI_OnLoad in %s (System.loadLibrary)", path);
+        logCoreLine(4, message);
+        std::fprintf(stderr, "%s\n", message);
+        jint version = 0;
+        auto initialize = reinterpret_cast<jint (*)(JavaVM*, void*)>(symbol);
+        const int guard = kudroid_call_jni_onload_guarded(initialize, vm, &version);
+        std::snprintf(message, sizeof(message), "[kudroid_core] JNI_OnLoad(%s) returned version: %d (guard=%d)", path, version, guard);
+        logCoreLine(guard == 0 ? 4 : 5, message);
+        std::fprintf(stderr, "%s\n", message);
+        if (guard != 0) {
+            const std::string report = describeJniGuardFault(path, guard);
+            std::fputs(report.c_str(), stderr);
+            appendCrashLogFile(report);
+        }
+        const bool succeeded = guard == 0 &&
+            kudroid::kuart::JniLibraryRegistry::IsSupportedVersion(version) && !env->ExceptionCheck();
+        if (succeeded) {
+            kudroid_boot_mark(("jni-onload " + std::filesystem::path(path).filename().string()).c_str());
+        } else {
+            logCoreLine(5, std::string("[kudroid_core] JNI initialization failed: ") + path);
+        }
+        return succeeded;
+    });
+}
+
 // Guest symbol hook used by bionic_dlsym for DUMMY_HANDLE.
 extern "C" {
 extern void* (*kudroid_guest_symbol_lookup)(const char* name);
@@ -357,6 +398,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 
     // Clear all old logs before launching guest app so logs start fresh for this run
     kudroid_clear_all_logs();
+    kudroid_log_vm_startup_probe();
+    kudroid_probe_virtual_memory("guest-start");
 
     // Fresh frame-liveness clock: the watchdog's frame-silence trigger must
     // measure THIS run's presents, not the previous session's last swap.
@@ -549,7 +592,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 
             // Hook guest symbol lookup for bionic_dlsym(DUMMY_HANDLE, ...).
             kudroid_guest_symbol_lookup = [](const char* name) -> void* {
-                return globalLibraryManager().resolveGlobalSymbol(name);
+                return globalLibraryManager().resolveGlobalSymbol(name, false);
             };
 
             // Per-library dlopen/dlsym for the guest's own .so files. Installed here
@@ -565,7 +608,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 std::fprintf(stderr, "[KuART] %s\n", msg);
             });
             kuart_set_symbol_lookup([](const char* symbol) -> void* {
-                return globalLibraryManager().resolveGlobalSymbol(symbol);
+                return globalLibraryManager().resolveGlobalSymbol(symbol, false);
             });
 
             if (kuart_init(appDir.string().c_str())) {
@@ -626,98 +669,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         manager.resolveAppSymbol("ANativeActivity_onCreate")
                     );
 
-                    static std::set<std::string> s_loadedJniOnLoads;
-                    auto invokeJniOnLoad = [](const std::string& libname) -> int {
-                        if (libname.empty()) return 0;
-                        std::string name = libname;
-                        std::string filename = name;
-                        if (filename.find(".so") == std::string::npos) {
-                            filename = "lib" + filename + ".so";
-                        }
-                        kudroid::LibraryManager& manager = globalLibraryManager();
-                        void* sym = manager.resolveSymbolInLib(filename, "JNI_OnLoad");
-                        if (!sym) sym = manager.resolveSymbolInLib(name, "JNI_OnLoad");
-                        if (sym) {
-                            if (s_loadedJniOnLoads.insert(filename).second) {
-                                JavaVM* jvm = kuart_get_javavm();
-                                if (jvm) {
-                                    bionic_init_main_thread_tls();
-                                    char msg[256];
-                                    snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s", filename.c_str());
-                                    logCoreLine(4, msg);
-                                    std::fprintf(stderr, "%s\n", msg);
-
-                                    auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
-                                    jint version = 0;
-                                    const int guardRc = kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
-                                    if (guardRc == 0) {
-                                        snprintf(msg, sizeof(msg), "[kudroid_core] JNI_OnLoad(%s) returned version: %d", filename.c_str(), version);
-                                        logCoreLine(4, msg);
-                                        std::fprintf(stderr, "%s\n", msg);
-                                        kudroid_boot_mark(
-                                            ("jni-onload " + std::filesystem::path(filename).filename().string())
-                                                .c_str());
-                                    } else if (guardRc < 0) {
-                                        snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
-                                        logCoreLine(5, msg);
-                                        std::fprintf(stderr, "%s\n", msg);
-                                        const std::string report =
-                                            describeJniGuardFault(filename, guardRc);
-                                        std::fputs(report.c_str(), stderr);
-                                        appendCrashLogFile(report);
-                                    } else {
-                                        snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: JNI_OnLoad in %s raised fatal signal %d", filename.c_str(), guardRc);
-                                        logCoreLine(5, msg);
-                                        std::fprintf(stderr, "%s\n", msg);
-                                        const std::string report =
-                                            describeJniGuardFault(filename, guardRc);
-                                        std::fputs(report.c_str(), stderr);
-                                        appendCrashLogFile(report);
-                                    }
-
-                                    const char* leaked = nullptr;
-                                    if (kuart_take_pending_exception(&leaked)) {
-                                        snprintf(msg, sizeof(msg),
-                                                 "[kudroid_core] JNI_OnLoad(%s) left a pending Java exception; cleared",
-                                                 filename.c_str());
-                                        logCoreLine(5, msg);
-                                        std::fprintf(stderr, "%s:\n%s\n", msg,
-                                                     leaked != nullptr ? leaked : "?");
-                                    }
-                                }
-                            }
-                        }
-                        return 1;
-                    };
-
-                    kuart_set_load_library_callback([](const char* libname) -> int {
-                        if (!libname || !*libname) return 0;
-                        kudroid::LibraryManager& manager = globalLibraryManager();
-                        std::string filename = libname;
-                        if (filename.find(".so") == std::string::npos) {
-                            filename = "lib" + filename + ".so";
-                        }
-                        void* sym = manager.resolveSymbolInLib(filename, "JNI_OnLoad");
-                        if (!sym) sym = manager.resolveSymbolInLib(libname, "JNI_OnLoad");
-                        if (sym) {
-                            static std::set<std::string> s_dynamicJniOnLoads;
-                            if (s_dynamicJniOnLoads.insert(filename).second) {
-                                JavaVM* jvm = kuart_get_javavm();
-                                if (jvm) {
-                                    bionic_init_main_thread_tls();
-                                    char msg[256];
-                                    snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s (System.loadLibrary)", filename.c_str());
-                                    logCoreLine(4, msg);
-                                    std::fprintf(stderr, "%s\n", msg);
-
-                                    auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
-                                    jint version = 0;
-                                    kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
-                                }
-                            }
-                        }
-                        return 1;
-                    });
+                    kuart_set_load_library_callback(&loadGuestJniLibrary);
 
                     if (native_activity_create) {
                         appendAndEcho("[kudroid_core] Native Game Activity detected.");
@@ -1231,12 +1183,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             }
                         }
 
-                        // Execute JNI_OnLoad for all pre-loaded native libraries so that RegisterNatives
-                        // binds all JNI methods (e.g. UnityPlayer native callbacks) before Java startup.
-                        for (const auto& [libPath, loader] : manager.libraries()) {
-                            invokeJniOnLoad(libPath);
-                        }
-
+                        // Java requests native initialization after process attachment.
                         if (!kuart_launch_app(pkgName.c_str(),
                                               manifestComponentFactory.c_str(),
                                               manifestAppClass.c_str(),

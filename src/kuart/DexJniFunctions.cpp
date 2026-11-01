@@ -2,6 +2,7 @@
 // Handle convention: jobject -> DexObject*, jclass -> DexClass*,
 // jmethodID -> DexMethod*, jfieldID -> DexField*.
 #include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/kuart/JniLibraryRegistry.h"
 #include "kudroid/kuart/VmLock.h"
 #include "kudroid/abi/GuestVarargs.h"
 
@@ -109,8 +110,11 @@ jclass JNICALL FindClass(JNIEnv* env, const char* name) {
                                " (class not implemented in KuDroid framework)");
         return nullptr;
     }
-    // JNI FindClass instantiates the class (as defined by the JNI spec).
-    if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(klass);
+    // Android class lookup links without running the initializer.
+    if (!self->linker()->LinkClass(klass)) {
+        ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
+        return nullptr;
+    }
     if (JnibridgeTraceActive()) {
         std::fprintf(stderr, "[KuART][JNIBRIDGE] FindClass %s -> FOUND\n", name);
     }
@@ -345,7 +349,7 @@ jobject JNICALL AllocObject(JNIEnv* env, jclass clazz) {
                            "AllocObject with an invalid class handle");
         return nullptr;
     }
-    if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(k);
+    if (self->interpreter() != nullptr && !self->interpreter()->EnsureInitialized(k)) return nullptr;
     return self->AddLocalRef(self->linker()->AllocObject(k));
 }
 
@@ -370,6 +374,7 @@ jobject JNICALL NewObjectV(JNIEnv* env, jclass clazz, jmethodID methodID, va_lis
                            "NewObject with an invalid class handle");
         return nullptr;
     }
+    if (self->interpreter() != nullptr && !self->interpreter()->EnsureInitialized(k)) return nullptr;
     DexObject* obj = self->linker()->AllocObject(k);
     if (obj == nullptr) return nullptr;
     DexMethod* method = Mth(methodID);
@@ -403,8 +408,10 @@ jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const
                                (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
+    if (self->interpreter() != nullptr && !self->interpreter()->EnsureInitialized(k)) return nullptr;
     DexMethod* m = k->FindVirtualMethod(name, sig);
     if (m == nullptr) m = k->FindDirectMethod(name, sig);
+    if (m != nullptr && m->IsStatic()) m = nullptr;
     if (m == nullptr) {
         if (JnibridgeTraceActive()) {
             std::fprintf(stderr, "[KuART][JNIBRIDGE] GetMethodID %s.%s%s -> MISS\n",
@@ -433,7 +440,9 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
                                (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
+    if (self->interpreter() != nullptr && !self->interpreter()->EnsureInitialized(k)) return nullptr;
     DexMethod* m = k->FindDirectMethod(name, sig);
+    if (m != nullptr && !m->IsStatic()) m = nullptr;
     if (m == nullptr) {
         if (JnibridgeTraceActive()) {
             std::fprintf(stderr, "[KuART][JNIBRIDGE] GetStaticMethodID %s.%s%s -> MISS\n",
@@ -458,6 +467,7 @@ jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const c
                                (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
+    if (self->interpreter() != nullptr && !self->interpreter()->EnsureInitialized(k)) return nullptr;
     DexField* f = k->FindInstanceField(name, sig);
     if (f == nullptr) {
         if (JnibridgeTraceActive()) {
@@ -484,6 +494,7 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
                                (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
+    if (self->interpreter() != nullptr && !self->interpreter()->EnsureInitialized(k)) return nullptr;
     DexField* f = k->FindStaticField(name, sig);
     if (f == nullptr) {
         if (JnibridgeTraceActive()) {
@@ -1319,9 +1330,13 @@ jint JNICALL AttachCurrentThread(JavaVM* vm, void** penv, void*) {
 
 jint JNICALL DetachCurrentThread(JavaVM*) { return JNI_OK; }
 
-jint JNICALL GetEnv(JavaVM* vm, void** penv, jint) {
+jint JNICALL GetEnv(JavaVM* vm, void** penv, jint version) {
     DexJniEnv* self = DexJniEnv::FromVm(vm);
     if (self == nullptr || penv == nullptr) return JNI_ERR;
+    if (!JniLibraryRegistry::IsSupportedVersion(version)) {
+        *penv = nullptr;
+        return JNI_EVERSION;
+    }
     *penv = self->env();
     return JNI_OK;
 }

@@ -35,6 +35,10 @@ public:
     bool AddDexFile(const uint8_t* bytes, size_t size, const std::string& location,
                     std::string* error_msg = nullptr, bool boot_class_path = false);
 
+    // Validate all buffers before registering them; retain their bytes for class lookup.
+    bool AddOwnedDexFiles(std::vector<std::vector<uint8_t>> buffers,
+                          std::string* error_msg);
+
     // Find class by descriptor ("Lcom/foo/Bar;", "[I", "I"). Returns nullptr if missing.
     DexClass* FindClass(const char* descriptor);
     // Like FindClass, but a missing boot-classpath class stays missing: no placeholder is
@@ -208,6 +212,8 @@ private:
     static uint32_t FieldSizeForDescriptor(const char* descriptor);
 
     DexHeap heap_;
+    // Destroy DEX views before their backing storage.
+    std::vector<std::vector<uint8_t>> owned_dex_bytes_;
     std::vector<std::unique_ptr<const art::DexFile>> dex_files_;
     std::unordered_set<const art::DexFile*> boot_dex_files_;
     std::unordered_map<std::string, DexClass*> classes_;

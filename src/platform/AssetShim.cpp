@@ -465,18 +465,29 @@ static AAssetImpl* open_asset(const char* filename) {
     long entryLength = 0;
 
     if (!resolve_asset_path(base, filename, &rel, &full)) {
-        // Fallback: Check if base.apk exists in parent directory of assets dir
+        // Fallback: serve the entry out of base.apk, which APKExtractor keeps next
+        // to the extracted tree.
         const auto appDir = std::filesystem::path(base).parent_path();
         const auto baseApk = appDir / "base.apk";
         std::error_code ec;
         if (std::filesystem::exists(baseApk, ec)) {
-            std::string entryName = filename;
-            if (entryName.rfind("assets/", 0) != 0) {
-                entryName = "assets/" + entryName;
-            }
-            uint64_t payloadOff = 0, payloadSize = 0;
-            uint16_t method = 0;
-            if (zip_stat_entry(baseApk.string(), entryName, &payloadOff, &payloadSize, &method)) {
+            // An AAssetManager name is relative to the APK's assets/ root, so the
+            // entry is "assets/" + name — first candidate, and the only correct one
+            // when the APK nests an assets/ folder inside assets/ (Minecraft ships
+            // 36001 of 36005 entries under assets/assets/ and asks for e.g.
+            // "assets/bootstrap.json"). The bare name is only tried when it already
+            // names an assets/ path: games that pass the zip entry name itself.
+            // Candidate order matches Android when both entries exist.
+            const std::string semantic = "assets/" + std::string(filename);
+            std::string candidates[2] = {semantic, filename};
+            for (const std::string& entryName : candidates) {
+                if (entryName.rfind("assets/", 0) != 0) continue;
+                uint64_t payloadOff = 0, payloadSize = 0;
+                uint16_t method = 0;
+                if (!zip_stat_entry(baseApk.string(), entryName, &payloadOff,
+                                    &payloadSize, &method)) {
+                    continue;
+                }
                 if (method == 0) {
                     rel = filename;
                     full = baseApk;
@@ -484,12 +495,13 @@ static AAssetImpl* open_asset(const char* filename) {
                     entryLength = static_cast<long>(payloadSize);
                 } else {
                     const auto& remapper = VFSPathRemapper::getInstance();
-                    const std::string cached = extract_jar_entry_to_cache(baseApk.string(), entryName, remapper.androidRoot());
-                    if (!cached.empty()) {
-                        rel = filename;
-                        full = cached;
-                    }
+                    const std::string cached = extract_jar_entry_to_cache(
+                            baseApk.string(), entryName, remapper.androidRoot());
+                    if (cached.empty()) continue;
+                    rel = filename;
+                    full = cached;
                 }
+                break;
             }
         }
     }
@@ -691,15 +703,20 @@ extern "C" void* bionic_AAssetManager_openDir(void* /*manager*/, const char* dir
         return dir;
     }
 
-    // Fallback: enumerate entries directly from base.apk when assets/ is not on disk
+    // Fallback: enumerate entries directly from base.apk when assets/ is not on disk.
+    // Same candidate rule as open_asset(): the AAssetManager root is the APK's
+    // assets/ folder, so "assets/<dir>" lists APK!assets/assets/<dir> first; the
+    // bare name is only tried when it already names an assets/ path.
     const auto appDir = std::filesystem::path(base).parent_path();
     const auto baseApk = appDir / "base.apk";
     if (std::filesystem::exists(baseApk, ec)) {
-        std::string prefix = requested;
-        if (prefix.rfind("assets/", 0) != 0) {
-            prefix = "assets/" + prefix;
+        const std::string semantic = "assets/" + requested;
+        const std::string candidates[2] = {semantic, requested};
+        for (const std::string& prefix : candidates) {
+            if (prefix.rfind("assets/", 0) != 0) continue;
+            dir->names = zip_list_dir_entries(baseApk.string(), prefix);
+            if (!dir->names.empty()) break;
         }
-        dir->names = zip_list_dir_entries(baseApk.string(), prefix);
     }
     return dir;
 }

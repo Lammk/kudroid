@@ -3,15 +3,8 @@ package java.lang;
 /**
  * java.lang.Character.
  *
- * The classification methods are ASCII-exact and give a sensible approximation above
- * U+007F. There is no Unicode character database on the device: shipping one would add
- * megabytes to framework.dex for behaviour almost no app depends on. Where a precise
- * answer is impossible, the choice errs towards "letter" for assigned non-ASCII code
- * points, which is what text-processing code assumes.
- *
- * getType() and the general-category constants exist because java.util.regex needs them
- * to compile \p{L}, \p{Nd} and friends; the mapping is exact for ASCII and coarse above
- * it, so those classes work for Latin text and degrade gracefully elsewhere.
+ * Classification is exact for ASCII and approximate above U+007F.
+ * Case conversion uses Unicode 13.0 simple mappings.
  */
 public final class Character implements Comparable<Character> {
 
@@ -333,10 +326,7 @@ public final class Character implements Comparable<Character> {
     }
 
     public static int toUpperCase(int c) {
-        if (c >= 'a' && c <= 'z') return c - 32;
-        // Latin-1 supplement: à-þ maps to À-Þ, but ÷ (0xf7) is not a letter.
-        if (c >= 0x00e0 && c <= 0x00fe && c != 0x00f7) return c - 32;
-        return c;
+        return CharacterCaseMap.upper(c);
     }
 
     public static char toLowerCase(char c) {
@@ -344,9 +334,7 @@ public final class Character implements Comparable<Character> {
     }
 
     public static int toLowerCase(int c) {
-        if (c >= 'A' && c <= 'Z') return c + 32;
-        if (c >= 0x00c0 && c <= 0x00de && c != 0x00d7) return c + 32;
-        return c;
+        return CharacterCaseMap.lower(c);
     }
 
     public static char toTitleCase(char c) {

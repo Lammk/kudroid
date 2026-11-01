@@ -1,0 +1,28 @@
+{
+  "v8_version": "9.4.146.24",
+  "file": "v8-9.4.146.24.so",
+  "sha256": "bb87b084153a3433cf54db16fb621ddaefad1d3539c1d9370b66eee6edfa176c",
+  "api_version": 1,
+  "source": "https://github.com/v8/v8/tree/9.4.146.24",
+  "early_length": 4294967296,
+  "early_alignment": 4294967296,
+  "source_headers": {
+    "include/v8-platform.h": "7398d2879534f2986b59efbda90178580e8b9a7ab803b716405fa9aad0a4f64a",
+    "include/v8-internal.h": "926de5f50088bb013d4c0248371f7b700974494993c8ed5340c8f774e2723782",
+    "src/utils/allocation.h": "b97c7c182c546a10e3d0cb058044b45310f93b18fe091255efb5c781748afe09",
+    "src/base/bounded-page-allocator.h": "872739641e321789153cf2ada02165e9d6035370d2bcf004d8f6e4e990fc1949"
+  },
+  "imports": [
+    "_ZN2v84base20BoundedPageAllocatorC1EPNS_13PageAllocatorEmmm",
+    "_ZN2v88internal13VirtualMemory5ResetEv",
+    "_ZN2v88internal13VirtualMemoryD1Ev",
+    "_ZdlPv",
+    "_Znwm"
+  ],
+  "exports": [
+    "_ZN2v88internal17VirtualMemoryCage15InitReservationERKNS1_17ReservationParamsE",
+    "kudroid_v8_cage_configure",
+    "kudroid_v8_cage_requirements"
+  ],
+  "device_verified": false
+}

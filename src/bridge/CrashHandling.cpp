@@ -4,8 +4,10 @@
 #include "BridgeShared.h"
 #include "CrashInternal.h"
 #include "CrashHandling.h"
+#include "TrapDiagnostics.h"
 #include "kudroid/BionicShim.h"
 #include "kudroid/FaultSkip.h"
+#include "kudroid/ElfAliasStore.h"
 #include "kudroid/debug/FrameWalk.h"
 #include "kudroid/KuArtRuntime.h"
 #include "kudroid/elf_loader.hpp"
@@ -1385,6 +1387,39 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
         return;
     }
+#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
+    if ((sig == SIGBUS || sig == SIGSEGV) && info && ucontext) {
+        const uintptr_t fault = reinterpret_cast<uintptr_t>(info->si_addr);
+        const auto& aliases = kudroid::GuestElfWritableAliases();
+        if (aliases.ContainsFault(fault)) {
+            auto* uc = static_cast<ucontext_t*>(ucontext);
+            uint32_t instruction = 0;
+            vm_size_t got = 0;
+            const auto& ss = uc->uc_mcontext->__ss;
+            if (vm_read_overwrite(mach_task_self(), ss.__pc, sizeof(instruction),
+                                  reinterpret_cast<vm_address_t>(&instruction), &got) == KERN_SUCCESS &&
+                got == sizeof(instruction)) {
+                kudroid::Arm64StoreState state;
+                for (unsigned r = 0; r < 29; ++r) state.x[r] = ss.__x[r];
+                state.x[29] = ss.__fp;
+                state.x[30] = ss.__lr;
+                state.x[31] = ss.__sp;
+                state.pc = ss.__pc;
+                std::memcpy(state.v, uc->uc_mcontext->__ns.__v, sizeof(state.v));
+                if (kudroid::EmulateElfAliasStore(instruction, fault, state, aliases)) {
+                    // Only addressing writeback and PC change; source registers stay intact.
+                    auto& out = uc->uc_mcontext->__ss;
+                    for (unsigned r = 0; r < 29; ++r) out.__x[r] = state.x[r];
+                    out.__fp = state.x[29];
+                    out.__lr = state.x[30];
+                    out.__sp = state.x[31];
+                    out.__pc = state.pc;
+                    return;
+                }
+            }
+        }
+    }
+#endif
     // Diagnostic: which fatal signal actually arrives. Per-signal caps: TRAP
     // fires constantly (TLS emulation), the rest are rare.
     if (sig == SIGTRAP || sig == SIGILL || sig == SIGBUS || sig == SIGSEGV ||
@@ -1500,6 +1535,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             }
             return;
         }
+#if defined(__APPLE__) && defined(__arm64__)
+        if (ucontext != nullptr) {
+            const auto& state = static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss;
+            uint64_t registers[8];
+            for (unsigned i = 0; i < 8; ++i) registers[i] = state.__x[i];
+            kudroid::record_trap_diagnostics(sig, state.__pc, state.__lr, state.__sp, registers);
+        }
+#endif
         static std::atomic<int> s_trapUnhandled{0};
         if (s_trapUnhandled.load() < 8) {
             ++s_trapUnhandled;
@@ -1538,6 +1581,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (kudroid::bionic_handle_fmod_vorbis_trap(ucontext)) {
             return;
         }
+#if defined(__APPLE__) && defined(__arm64__)
+        if (ucontext != nullptr) {
+            const auto& state = static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss;
+            uint64_t registers[8];
+            for (unsigned i = 0; i < 8; ++i) registers[i] = state.__x[i];
+            kudroid::record_trap_diagnostics(sig, state.__pc, state.__lr, state.__sp, registers);
+        }
+#endif
     }
 
     // Record the fault BEFORE anyone gets a chance to swallow it.
