@@ -45,6 +45,7 @@ public final class KuSSLSocket extends SSLSocket {
     private long handle;
     private boolean handshaken;
     private boolean closed;
+    private boolean useSessionTickets;
     private KuSSLSession session;
     private String negotiatedAlpn;
     private String[] protocols = KuSSLSocketFactory.DEFAULT_PROTOCOLS.clone();
@@ -73,7 +74,7 @@ public final class KuSSLSocket extends SSLSocket {
             if (fd < 0 || !under.isConnected()) throw new SocketException("Socket is not connected");
 
             String sni = serverName();
-            handle = KuTls.create(fd, sni == null ? "" : sni, alpnCsv(), minVersion());
+            handle = KuTls.create(fd, sni == null ? "" : sni, alpnCsv(), minVersion(), useSessionTickets);
             if (handle == 0) throw new SSLException("TLS is not available");
             int timeout = under.getSoTimeout();
             int rc = KuTls.handshake(handle, timeout > 0 ? timeout : DEFAULT_HANDSHAKE_MS);
@@ -390,6 +391,12 @@ public final class KuSSLSocket extends SSLSocket {
 
     @Override
     public void setHostname(String hostname) { this.host = hostname; }
+
+    public void setUseSessionTickets(boolean enabled) {
+        synchronized (lock) {
+            if (!handshaken && !closed) useSessionTickets = enabled;
+        }
+    }
 
     // ── everything else belongs to the wrapped socket ────────────────────────
 

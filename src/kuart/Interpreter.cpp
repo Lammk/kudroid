@@ -9,6 +9,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <pthread.h>
 #include <set>
 #include <tuple>
 #include <unordered_map>
@@ -23,6 +25,7 @@
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/LibCore.h"
 #include "kudroid/kuart/VmLock.h"
+#include "kudroid/kuart/MethodResolutionTrace.h"
 #include "kudroid/NativeCallTelemetry.h"
 
 namespace kudroid {
@@ -714,6 +717,18 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     if (context == nullptr || context->dex_file == nullptr) return nullptr;
     const art::DexFile& dex_file = *context->dex_file;
     if (method_idx >= dex_file.NumMethodIds()) return nullptr;
+    auto trace = [&](DexMethod* method, const char* source, const DexClass* owner = nullptr) {
+        const auto& id = dex_file.GetMethodId(method_idx);
+        char line[384];
+        std::snprintf(line, sizeof(line),
+            "source=%s runtime=%p context=%p dex=%p index=%u target=%p lookup_class=%p ref=%s->%s",
+            source, static_cast<void*>(linker_), static_cast<const void*>(context),
+            static_cast<const void*>(&dex_file), method_idx, static_cast<void*>(method),
+            static_cast<const void*>(owner), dex_file.StringByTypeIdx(id.class_idx_),
+            dex_file.GetMethodName(id));
+        RecordMethodResolution((uintptr_t)pthread_self(), line);
+        return method;
+    };
     const uint64_t generation = g_fastVirtualGeneration.load(std::memory_order_relaxed);
     if (t_fastMethodGeneration != generation) {
         std::fill_n(t_fastMethodCache, kFastMethodSlots, FastMethodSlot{});
@@ -726,16 +741,16 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     const FastMethodSlot& cached = t_fastMethodCache[slot];
     if (cached.linker == linker_ && cached.dex == &dex_file && cached.owner == context->declaring_class
             && cached.index == method_idx && cached.is_static == is_static
-            && cached.exact_owner == exact_owner) return cached.method;
-    auto remember = [&](DexMethod* method) {
+            && cached.exact_owner == exact_owner) return trace(cached.method, "fast-cache");
+    auto remember = [&](DexMethod* method, const char* source, const DexClass* owner = nullptr) {
         if (method != nullptr) t_fastMethodCache[slot] = FastMethodSlot{
                 linker_, &dex_file, context->declaring_class, method_idx, is_static, exact_owner, method};
-        return method;
+        return trace(method, source, owner);
     };
     if (!exact_owner) {
         if (DexMethod* cached =
                 linker_->FindResolvedMethod(context->dex_file, method_idx, is_static)) {
-            return remember(cached);
+            return remember(cached, "shared-cache");
         }
     }
     const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
@@ -759,11 +774,11 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
 
     if (DexMethod* m = klass->FindDirectMethod(name, signature.c_str())) {
         if (!exact_owner) linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, m);
-        return remember(m);
+        return remember(m, "direct-lookup", klass);
     }
     if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) {
         if (!exact_owner) linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, m);
-        return remember(m);
+        return remember(m, "virtual-lookup", klass);
     }
 
     auto isBootClasspathDescriptor = [](const char* desc) -> bool {
@@ -817,7 +832,7 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
             if (!exact_owner) {
                 linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, cached);
             }
-            return cached;
+            return trace(cached, "stub-cache", klass);
         }
 
         auto stubM = std::make_unique<DexMethod>();
@@ -833,7 +848,7 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
         if (!exact_owner) {
             linker_->CacheResolvedMethod(context->dex_file, method_idx, is_static, res);
         }
-        return res;
+        return trace(res, "new-stub", klass);
     }
     return nullptr;
 }
@@ -1160,6 +1175,9 @@ bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, 
 }
 
 DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, size_t num_args) {
+    // Builtins and bodyless methods also access shared VM state.
+    std::optional<VmLockGuard> vm_lock;
+    if (VmLockDepth() == 0) vm_lock.emplace();
     // Report uncaught exceptions on exit when no Java frame caught them.
     struct UncaughtReporter {
         Interpreter* self;
@@ -1245,10 +1263,6 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
 
     // Instruction limit is per top-level call, not cumulative.
     if (depth_ == 0) instructions_executed_ = 0;
-
-    // Serialize bytecode; key on lock held, not call depth, for callbacks.
-    std::unique_ptr<VmLockGuard> vm_lock;
-    if (VmLockDepth() == 0) vm_lock = std::make_unique<VmLockGuard>();
 
     // Publish frame and depth; unwind by resizing to survive longjmps.
     struct StackEntry {

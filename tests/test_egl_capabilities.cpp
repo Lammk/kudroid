@@ -11,6 +11,16 @@
 extern "C" const char* bionic_eglQueryString(EGLDisplay, EGLint);
 extern "C" EGLBoolean bionic_eglChooseConfig(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
 extern "C" EGLint bionic_eglGetError();
+extern "C" const char* bionic_glGetString(unsigned int);
+extern "C" const char* bionic_glGetStringi(unsigned int, unsigned int);
+extern "C" void bionic_glGetIntegerv(unsigned int, int*);
+extern "C" void* bionic_eglGetProcAddress(const char*);
+extern "C" void bionic_glBufferData(unsigned, long, const void*, unsigned);
+extern "C" void bionic_glBufferSubData(unsigned, long, long, const void*);
+extern "C" void* bionic_glMapBufferRange(unsigned, long, long, unsigned);
+extern "C" void bionic_glPushDebugGroup(unsigned, unsigned, int, const char*);
+extern "C" void bionic_glObjectLabel(unsigned, unsigned, int, const char*);
+extern "C" unsigned bionic_glGetError();
 
 static int checks, failures;
 static std::atomic<int> probes{0};
@@ -56,7 +66,126 @@ extern "C" EGLint eglGetError() {
     return result;
 }
 
+static const char* glList[] = {"GL_OES_a", "GL_EXT_disjoint_timer_query", "GL_OES_b"};
+static const char* glJoined = "GL_OES_a GL_EXT_disjoint_timer_query GL_OES_b";
+static unsigned lastIndex;
+extern "C" const char* glGetString(unsigned int name) {
+    return name == 0x1F03 ? glJoined : "renderer";
+}
+extern "C" const char* glGetStringi(unsigned int, unsigned int index) {
+    lastIndex = index;
+    return index < 3 ? glList[index] : nullptr;
+}
+extern "C" void glGetIntegerv(unsigned int pname, int* value) {
+    *value = pname == 0x821D ? 3 : 7;
+}
+
+static void gl_checks() {
+    check(std::strcmp(bionic_glGetString(0x1F03), "GL_OES_a GL_OES_b") == 0,
+          "never-completing timer query extension is hidden from GL_EXTENSIONS");
+    check(std::strcmp(bionic_glGetString(0x1F01), "renderer") == 0, "other GL strings unchanged");
+    int count = 0;
+    bionic_glGetIntegerv(0x821D, &count);
+    check(count == 2, "GL_NUM_EXTENSIONS excludes hidden extensions");
+    int other = 0;
+    bionic_glGetIntegerv(0x0D33, &other);
+    check(other == 7, "unrelated integer queries unchanged");
+    check(std::strcmp(bionic_glGetStringi(0x1F03, 0), "GL_OES_a") == 0 &&
+          std::strcmp(bionic_glGetStringi(0x1F03, 1), "GL_OES_b") == 0,
+          "indexed extensions skip hidden entries");
+    bionic_glGetStringi(0x1F03, 2);
+    check(lastIndex >= 3, "out-of-range index still reaches the backend as out of range");
+    glJoined = "GL_OES_a GL_OES_b";
+    check(bionic_glGetString(0x1F03) == glJoined, "lists without hidden tokens pass through unchanged");
+}
+
+static unsigned bufferTarget, bufferFlags, labelKind, labelId, driverError;
+static long bufferOffset, bufferSize;
+static const void* bufferInput;
+static const char* labelInput;
+static int labelLength, bufferCalls, labelCalls, errorQueries;
+static bool provideLabels;
+static void* mappedResult;
+
+extern "C" void glBufferData(unsigned target, long size, const void* data, unsigned usage) {
+    ++bufferCalls;
+    bufferTarget = target; bufferSize = size; bufferInput = data; bufferFlags = usage;
+}
+extern "C" void glBufferSubData(unsigned target, long offset, long size, const void* data) {
+    ++bufferCalls;
+    bufferTarget = target; bufferOffset = offset; bufferSize = size; bufferInput = data;
+}
+extern "C" void* glMapBufferRange(unsigned target, long offset, long length, unsigned access) {
+    ++bufferCalls;
+    bufferTarget = target; bufferOffset = offset; bufferSize = length; bufferFlags = access;
+    return mappedResult;
+}
+extern "C" void glPushDebugGroup(unsigned source, unsigned id, int length, const char* message) {
+    ++labelCalls;
+    labelKind = source; labelId = id; labelLength = length; labelInput = message;
+}
+extern "C" void glObjectLabel(unsigned identifier, unsigned name, int length, const char* label) {
+    glPushDebugGroup(identifier, name, length, label);
+}
+extern "C" __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char* name) {
+    if (std::strcmp(name, "glPushDebugGroup") == 0)
+        return reinterpret_cast<__eglMustCastToProperFunctionPointerType>(&glPushDebugGroup);
+    if (provideLabels && std::strcmp(name, "glObjectLabel") == 0)
+        return reinterpret_cast<__eglMustCastToProperFunctionPointerType>(&glObjectLabel);
+    return nullptr;
+}
+extern "C" unsigned glGetError() {
+    ++errorQueries;
+    const unsigned error = driverError;
+    driverError = 0;
+    return error;
+}
+
+static void submission_checks() {
+    char data[] = {'a', 'b', 'c'};
+    driverError = 0x0502;
+    bionic_glBufferData(0x8892, 0x100000005L, data, 0x88E8);
+    check(bufferCalls == 1 && bufferTarget == 0x8892 && bufferSize == 0x100000005L &&
+          bufferInput == data && bufferFlags == 0x88E8, "buffer allocation retains 64-bit size and original payload");
+    bionic_glBufferData(0x8892, -1, nullptr, 0x88E4);
+    check(bufferCalls == 2 && bufferSize == -1 && bufferInput == nullptr,
+          "invalid allocation arguments still reach the backend once");
+    bionic_glBufferSubData(0x8893, 0x100000004L, 3, data);
+    check(bufferCalls == 3 && bufferOffset == 0x100000004L && bufferSize == 3 && bufferInput == data,
+          "buffer update retains 64-bit offset and original payload");
+    mappedResult = data;
+    check(bionic_glMapBufferRange(0x8892, 7, 3, 2) == data && bufferCalls == 4 &&
+          bufferOffset == 7 && bufferFlags == 2, "writable mapping returns the exact backend pointer");
+    mappedResult = nullptr;
+    check(bionic_glMapBufferRange(0x8892, -1, -2, 0) == nullptr && bufferCalls == 5 && bufferSize == -2,
+          "failed mapping keeps null result and invalid arguments");
+    check(bionic_eglGetProcAddress("glPushDebugGroup") == reinterpret_cast<void*>(&bionic_glPushDebugGroup),
+          "available debug group procedure routes through tracing");
+    check(bionic_eglGetProcAddress("glObjectLabel") == nullptr,
+          "tracing does not expose an unavailable optional procedure");
+    provideLabels = true;
+    check(bionic_eglGetProcAddress("glObjectLabel") == reinterpret_cast<void*>(&bionic_glObjectLabel),
+          "available object label procedure routes through tracing");
+    bionic_glPushDebugGroup(0x824A, 17, 3, data);
+    check(labelCalls == 1 && labelKind == 0x824A && labelId == 17 && labelLength == 3 && labelInput == data,
+          "explicit label length does not require a terminator or copy the driver input");
+    bionic_glObjectLabel(0x82E2, 29, -1, "program");
+    check(labelCalls == 2 && labelKind == 0x82E2 && labelId == 29 && labelLength == -1 &&
+          std::strcmp(labelInput, "program") == 0, "terminated object label preserves backend arguments");
+    bionic_glObjectLabel(0x82E0, 30, 0, nullptr);
+    check(labelCalls == 3 && labelLength == 0 && labelInput == nullptr, "null label removal reaches the backend");
+    const char* invalid = reinterpret_cast<const char*>(uintptr_t(1));
+    bionic_glPushDebugGroup(0x824A, 18, -2, invalid);
+    check(labelCalls == 4 && labelLength == -2 && labelInput == invalid,
+          "invalid negative label length is forwarded without inspecting its pointer");
+    check(errorQueries == 0 && driverError == 0x0502, "submission diagnostics never query or consume pending GL errors");
+    check(bionic_glGetError() == 0x0502 && bionic_glGetError() == 0 && errorQueries == 2,
+          "guest still receives the original GL error exactly once");
+}
+
 int main() {
+    gl_checks();
+    submission_checks();
     const EGLint requested[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
         EGL_DEPTH_SIZE, 16, EGL_STENCIL_SIZE, 8, EGL_RECORDABLE_ANDROID, EGL_TRUE, EGL_NONE};
     int count = -1;

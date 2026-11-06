@@ -98,6 +98,7 @@ bool Invoke_libcore_io_KuTls(Interpreter* /*interp*/, const char* name, const De
         options.hostname = Utf8(args[1]);
         options.alpn = SplitCsv(Utf8(args[2]));
         options.minVersion = args[3].i;
+        if (num_args >= 5) options.sessionTickets = args[4].i != 0 ? 1 : 0;
         TlsSession* s = TlsCreate(args[0].i, options);
         *result = DexValue::Long(static_cast<int64_t>(reinterpret_cast<intptr_t>(s)));
         return true;

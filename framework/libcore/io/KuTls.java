@@ -22,6 +22,8 @@ public final class KuTls {
 
     /** A session handle, or 0 when TLS is unavailable. alpnCsv lists offered protocols. */
     public static native long create(int fd, String hostname, String alpnCsv, int minVersion);
+    public static native long create(int fd, String hostname, String alpnCsv, int minVersion,
+            boolean useSessionTickets);
     public static native int handshake(long handle, int timeoutMs);
     /** Bytes read, 0 at end of stream, or a negative code (-110 on timeout). */
     public static native int read(long handle, byte[] buf, int off, int len, int timeoutMs);

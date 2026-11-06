@@ -7,6 +7,7 @@
 #include "kudroid/KuArtRuntime.h"
 #include "kudroid/kuart/JniLibraryRegistry.h"
 #include "kudroid/ResourceTable.h"
+#include "kudroid/RuntimeCageAdapter.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/NativeCallTelemetry.h"
@@ -657,6 +658,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 s_libsResident.store(true);
                 s_libsGeneration.store(s_installGeneration.load());
 
+                // Matching runtimes own their cages; unused startup spans can be released.
+                kudroid::releaseUnusedRuntimeCageReservations();
                 JavaVM* jvm = kuart_get_javavm();
                 if (!jvm) {
                     appendAndEcho("[kudroid_core] ERROR: KuART failed to initialize.");
@@ -1103,9 +1106,10 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             std::vector<const char*> actPtrs;
                             for (const auto& a : manifestActivities) actPtrs.push_back(a.c_str());
                             kudroid::VFSPathRemapper::getInstance().setPackageName(pkgName);
-                            kuart_register_package(pkgName.c_str(),
+                            kuart_register_package_with_state(pkgName.c_str(),
                                                    actPtrs.empty() ? nullptr : actPtrs.data(),
-                                                   static_cast<int>(actPtrs.size()));
+                                                   static_cast<int>(actPtrs.size()),
+                                                   manifestInfo.applicationEnabled);
                             {
                                 int vcode = 1;
                                 try {
@@ -1180,6 +1184,19 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             registerMeta(std::string(), manifestInfo.applicationMetaData);
                             for (const auto& a : manifestInfo.activities) {
                                 registerMeta(a.name, a.metaData);
+                            }
+                            for (const auto& service : manifestInfo.services) {
+                                kuart_register_service(service.name.c_str(), service.enabled,
+                                                       service.exported, service.permission.c_str());
+                                registerMeta(service.name, service.metaData);
+                                for (const auto& filter : service.intentFilters) {
+                                    std::vector<const char*> actions, categories;
+                                    for (const auto& action : filter.actions) actions.push_back(action.c_str());
+                                    for (const auto& category : filter.categories) categories.push_back(category.c_str());
+                                    kuart_register_service_intent_filter(service.name.c_str(),
+                                        actions.data(), static_cast<int>(actions.size()), categories.data(),
+                                        static_cast<int>(categories.size()), filter.priority, filter.hasData);
+                                }
                             }
                         }
 

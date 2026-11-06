@@ -66,7 +66,9 @@ public:
     bool map();
 
     /// applies dynamic repositioning and resolution of symbols.
-    bool relocate(const std::function<bool()>& finalizer = {});
+    // The initializer runs after protections and before guest constructors.
+    bool relocate(const std::function<bool()>& finalizer = {},
+                  const std::function<bool()>& initializer = {});
 
     // Named function bindings may change only during relocation finalization.
     bool interposeFunction(const char* name, void* replacement) {

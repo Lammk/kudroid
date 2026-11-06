@@ -97,6 +97,17 @@ bool AlignedVmReservations::prepare(std::size_t length, std::size_t alignment) {
     return true;
 }
 
+bool AlignedVmReservations::releasePrepared() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!prepared_) return true;
+    auto span = spans_.find(reinterpret_cast<std::uintptr_t>(prepared_));
+    if (span == spans_.end() || !unmap(prepared_, span->second)) return false;
+    spans_.erase(span);
+    prepared_ = nullptr;
+    preparedLength_ = preparedAlignment_ = 0;
+    return true;
+}
+
 void* AlignedVmReservations::reserve(std::size_t length, std::size_t alignment, void* hint) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (prepared_ && length == preparedLength_ && alignment == preparedAlignment_) {

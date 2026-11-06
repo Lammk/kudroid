@@ -217,6 +217,8 @@ bool LibraryManager::loadRecursive(const std::string& path) {
 
     if (!current->map() || !current->relocate([&] {
             return installRuntimeCageAdapter(*this, *current);
+        }, [&] {
+            return configureRuntimeCageExecution(*current);
         })) {
         lastError_ = "Load failed for " + key + ": " + current->lastError();
         std::fprintf(stderr, "[kudroid_core] %s\n", lastError_.c_str());

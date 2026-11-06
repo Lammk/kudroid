@@ -1,5 +1,6 @@
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/EglCapabilities.h"
+#include "kudroid/platform/GlesBackendProbe.h"
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/FramePacer.h"
@@ -932,6 +933,9 @@ typedef int EGLint;
 typedef EGLDisplay (*PFN_eglGetPlatformDisplayEXT)(EGLint platform, void* native_display, const EGLint* attrib_list);
 typedef void* (*PFN_eglGetProcAddress)(const char* procname);
 
+extern "C" void bionic_glPushDebugGroup(unsigned source, unsigned id, int length, const char* message);
+extern "C" void bionic_glObjectLabel(unsigned identifier, unsigned name, int length, const char* label);
+
 extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
     KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: requested %s", procname);
@@ -969,6 +973,11 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
             KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: host function not found");
         }
     }
+    // Trace optional entry points only when the backend provides them.
+    if (addr && std::strcmp(procname, "glPushDebugGroup") == 0)
+        return reinterpret_cast<void*>(&bionic_glPushDebugGroup);
+    if (addr && std::strcmp(procname, "glObjectLabel") == 0)
+        return reinterpret_cast<void*>(&bionic_glObjectLabel);
     return addr;
 }
 
@@ -1046,42 +1055,43 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
     return nullptr;
 }
 
-// ANGLE first-touch must occur on the MAIN thread. Evidence of real machine log:
-// GL TEST (run from C++ kudroid, main thread) init ANGLE is completely OK
-// (eglInitialize v1.5 -> pbuffer -> context -> glClear -> GL_RENDERER=
-// "ANGLE Metal Renderer: Apple A13 GPU"), also triangle guest first-touch ANGLE
-// ON RENDER PTHREAD -> abort immediately after eglGetDisplay returns VALID, first
-// eglInitialize (stack crash has guard string "(pretend done)" — static init of
-// ANGLE is blocked by guard shim when first run on a new thread). Warm-up to every
-// static init runs on the main thread before the guest touches it.
-// Warm-up runs the FULL pipeline that GL TEST has proven to work 100% on
-// main thread (init v1.5 -> pbuffer -> context -> makeCurrent -> glClear ->
-// GL_RENDERER="ANGLE Metal Renderer: Apple A13 GPU"). Every first-touch ANGLE
-// on render guest thread all abort (proof: warm-up getDisplay+init ->
-// guest died in eglInitialize; expand -> guest passes, dies at eglMakeCurrent
-// now at +0x4f18). Push all first-touch (display, device Metal, command queue,
-// context) to the main thread — the render thread just reuses the initialized state.
+// Initialize the selected backend on the main thread before guest rendering.
 extern "C" void kudroid_gpu_warmup_egl(void) {
+#if defined(KUDROID_GLES_USE_VULKAN) && KUDROID_GLES_USE_VULKAN
+    // Startup probes finish before any guest EGL calls on this thread.
+    struct ProbeError {
+        int (*getError)();
+        ~ProbeError() {
+            if (getError) {
+                const int error = getError();
+                if (error != 0x3000) gpuLog("warmup: EGL error=0x%x", error);
+            }
+        }
+    } probeError{reinterpret_cast<int (*)()>(get_egl_func("eglGetError"))};
+#endif
     // Full EGL typedefs not available here (declared later in file) — use local.
     typedef void* EGLConfig;
     typedef void* EGLSurface;
     typedef void* EGLContext;
     typedef unsigned int (*PFN_eglInitialize)(EGLDisplay, EGLint*, EGLint*);
-    typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
     typedef int (*PFN_eglChooseConfig)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
     typedef EGLSurface (*PFN_eglCreatePbufferSurface)(EGLDisplay, EGLConfig, const EGLint*);
     typedef EGLContext (*PFN_eglCreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint*);
     typedef unsigned int (*PFN_eglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    typedef unsigned int (*PFN_eglDestroySurface)(EGLDisplay, EGLSurface);
+    typedef unsigned int (*PFN_eglDestroyContext)(EGLDisplay, EGLContext);
 
-    auto get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
+    auto get_display = &kudroid::egl_default_display;
     auto init = (PFN_eglInitialize) get_egl_func("eglInitialize");
     auto choose_config = (PFN_eglChooseConfig) get_egl_func("eglChooseConfig");
     auto create_pbuffer = (PFN_eglCreatePbufferSurface) get_egl_func("eglCreatePbufferSurface");
     auto create_context = (PFN_eglCreateContext) get_egl_func("eglCreateContext");
     auto make_current = (PFN_eglMakeCurrent) get_egl_func("eglMakeCurrent");
+    auto destroy_surface = (PFN_eglDestroySurface) get_egl_func("eglDestroySurface");
+    auto destroy_context = (PFN_eglDestroyContext) get_egl_func("eglDestroyContext");
     auto gl_clear = (void (*)(unsigned int)) GL_FUNC_CACHED("glClear");
     if (!get_display || !init || !choose_config || !create_pbuffer ||
-        !create_context || !make_current || !gl_clear) {
+        !create_context || !make_current || !destroy_surface || !destroy_context || !gl_clear) {
         gpuLog("warmup: egl entry points missing (get_display=%p init=%p "
                "choose_config=%p create_pbuffer=%p create_context=%p "
                "make_current=%p gl_clear=%p)",
@@ -1090,7 +1100,7 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
                (void*)make_current, (void*)gl_clear);
         return;
     }
-    EGLDisplay dpy = get_display((EGLNativeDisplayType)0);
+    EGLDisplay dpy = get_display();
     if (!dpy) {
         gpuLog("warmup: eglGetDisplay -> NULL");
         return;
@@ -1100,7 +1110,8 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
         gpuLog("warmup: eglInitialize -> false");
         return;
     }
-    gpuLog("warmup: eglInitialize -> true (major=%d minor=%d)", major, minor);
+    gpuLog("warmup: backend=%s eglInitialize -> true (major=%d minor=%d)",
+           kudroid::egl_backend_name(), major, minor);
 
     // EGL 1.4 constants — standard values, use raw because shim does not include egl.h.
     #define W_EGL_SURFACE_TYPE 0x3033
@@ -1134,17 +1145,28 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
     EGLContext context = create_context(dpy, config, (EGLContext)0, contextAttribs);
     if (!context) {
         gpuLog("warmup: eglCreateContext -> NULL");
+        destroy_surface(dpy, surface);
         return;
     }
     gpuLog("warmup: eglCreateContext -> %p", (void*)context);
     if (!make_current(dpy, surface, surface, context)) {
         gpuLog("warmup: eglMakeCurrent -> false");
+        destroy_context(dpy, context);
+        destroy_surface(dpy, surface);
         return;
     }
     gpuLog("warmup: eglMakeCurrent -> true");
     gl_clear(0x4000 /* GL_COLOR_BUFFER_BIT */);
     gpuLog("warmup: glClear OK");
+#if defined(KUDROID_GLES_USE_VULKAN) && KUDROID_GLES_USE_VULKAN
+    const std::string features = kudroid::probe_vulkan_features(dpy);
+    KLOG(kInfo, "KuDroidGPU", "Vulkan backend features: %s", features.c_str());
+    const std::string probe = kudroid::probe_gles31();
+    KLOG(kInfo, "KuDroidGPU", "GLES backend probe: %s", probe.c_str());
+#endif
     make_current(dpy, (EGLSurface)0, (EGLSurface)0, (EGLContext)0);
+    destroy_context(dpy, context);
+    destroy_surface(dpy, surface);
     gpuLog("warmup: context released from main thread");
     #undef W_EGL_SURFACE_TYPE
     #undef W_EGL_PBUFFER_BIT
@@ -1156,28 +1178,21 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
     #undef W_EGL_NONE
 }
 
+extern "C" void kudroid_gpu_prepare_egl(void) {
+#if defined(KUDROID_GLES_USE_VULKAN) && KUDROID_GLES_USE_VULKAN
+    static std::once_flag warmup;
+    std::call_once(warmup, kudroid_gpu_warmup_egl);
+#endif
+}
+
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     (void)display_id;
     gpuLog("eglGetDisplay(display_id=%p)", (void*)display_id);
-    // PASS QUA (proof of real computer log, not guessing): display returns the word
-    // eglGetPlatformDisplayEXT(Metal) — even "VALID" — make process ABORT now
-    // when using (triangle: crash libtriangle_gles immediately after eglGetDisplay, before
-    // also log eglInitialize). And eglGetDisplay(0) fallback RUNS FULLY FINE:
-    // eglInitialize v1.5 → pbuffer surface → context → glClear OK →
-    // GL_RENDERER="ANGLE Metal Renderer: Apple A13 GPU" → glGetError=0.
-    // Both are ANGLE Metal backends — the fallback costs nothing, and is the way
-    // Only proven to work. Remove probe, use straight fallback.
-    typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
-    auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
-    if (host_get_display) {
-        // Always EGL_DEFAULT_DISPLAY (0) — CAMetalLayer is only used for surfaces.
-        EGLDisplay dpy = host_get_display((EGLNativeDisplayType)0);
-        gpuLog("eglGetDisplay: fallback -> %s (%p)", dpy ? "VALID" : "NULL", (void*)dpy);
-        return dpy;
-    }
-
-    gpuLog("eglGetDisplay: no eglGetDisplay entry point available");
-    return nullptr;
+    // Native windows are passed only when creating window surfaces.
+    EGLDisplay dpy = kudroid::egl_default_display();
+    gpuLog("eglGetDisplay: backend=%s -> %s (%p)", kudroid::egl_backend_name(),
+           dpy ? "VALID" : "NULL", dpy);
+    return dpy;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1980,9 +1995,45 @@ static EGLDisplay s_activeEglDisplay = nullptr;
 // Frame census: draws/clears were invisible (silent forwards), so per-frame
 // activity could not be told apart from an idle swap loop. Counters only;
 // summary printed from eglSwapBuffers every 120 swaps.
-static uint64_t g_drawCalls = 0;
-static uint64_t g_clearCalls = 0;
-static uint64_t g_swapCalls = 0;
+static std::atomic<uint64_t> g_drawCalls{0};
+static std::atomic<uint64_t> g_drawAttempts{0};
+static std::atomic<uint64_t> g_vertexSetups{0};
+static std::atomic<uint64_t> g_clearCalls{0};
+static std::atomic<uint64_t> g_shaderSources{0};
+static std::atomic<uint64_t> g_programLinks{0};
+static std::atomic<uint64_t> g_programBinds{0};
+static std::atomic<uint64_t> g_bufferUploads{0};
+static std::atomic<uint64_t> g_vertexPayloadCalls{0};
+static std::atomic<uint64_t> g_indexPayloadCalls{0};
+static std::atomic<uint64_t> g_bufferMapWrites{0};
+static std::atomic<uint64_t> g_textureUploads{0};
+static std::atomic<uint64_t> g_swapCalls{0};
+static std::atomic<uint64_t> g_swapFailures{0};
+
+static void trace_buffer_payload(const char* api, unsigned target, long offset,
+                                 long size, const void* data, const void* caller) {
+    if (size > 0 && data) {
+        if (target == 0x8892 /* GL_ARRAY_BUFFER */)
+            g_vertexPayloadCalls.fetch_add(1, std::memory_order_relaxed);
+        else if (target == 0x8893 /* GL_ELEMENT_ARRAY_BUFFER */)
+            g_indexPayloadCalls.fetch_add(1, std::memory_order_relaxed);
+    }
+    static std::atomic<unsigned> calls{0};
+    if (calls.fetch_add(1, std::memory_order_relaxed) < 96)
+        KLOG(kInfo, "KuDroidGPU", "GL buffer input: api=%s target=0x%x offset=%ld size=%ld data=%u caller=%p",
+             api, target, offset, size, data != nullptr, caller);
+}
+
+static void trace_gl_label(const char* api, unsigned kind, unsigned id, int length,
+                           const char* label, std::atomic<unsigned>& calls,
+                           std::atomic<unsigned>& logged) {
+    const unsigned call = calls.fetch_add(1, std::memory_order_relaxed);
+    if (call >= 12 && call % 120 != 0) return;
+    if (logged.fetch_add(1, std::memory_order_relaxed) >= 96) return;
+    const int capacity = length < 0 ? (length == -1 ? 128 : 0) : std::min(length, 128);
+    KLOG(kInfo, "KuDroidGPU", "GL label: api=%s kind=0x%x id=%u length=%d text='%.*s'",
+         api, kind, id, length, capacity, label && capacity > 0 ? label : "");
+}
 
 extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                                     EGLNativeWindowType win,
@@ -2210,6 +2261,9 @@ static void install_gl_diagnostics(void* context) {
     const char* language = strings(0x8B8C);
     KLOG(kInfo, "KuDroidGPU", "GL context=%p version=%s renderer=%s shading=%s", context,
          version ? version : "", renderer ? renderer : "", language ? language : "");
+    KLOG(kInfo, "KuDroidGPU", "GL draw backend: arrays=%p elements=%p arrays_instanced=%p elements_instanced=%p",
+         GL_FUNC_CACHED("glDrawArrays"), GL_FUNC_CACHED("glDrawElements"),
+         GL_FUNC_CACHED("glDrawArraysInstanced"), GL_FUNC_CACHED("glDrawElementsInstanced"));
     const char* extensions = strings(0x1F03);
     if (!extensions || !std::strstr(extensions, "GL_KHR_debug")) return;
     using Callback = void (*)(unsigned int, unsigned int, unsigned int, unsigned int, int, const char*, const void*);
@@ -2429,8 +2483,9 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     }
     tls_autorelease_pool = objc_autoreleasePoolPush();
 #endif
-    if (gpu_diag_enabled() && (g_swapCalls % 120) == 0) {
-        gpu_diag_sample_backbuffer(dpy, surface, g_swapCalls);
+    const uint64_t swapIndex = g_swapCalls.fetch_add(1, std::memory_order_relaxed);
+    if (gpu_diag_enabled() && (swapIndex % 120) == 0) {
+        gpu_diag_sample_backbuffer(dpy, surface, swapIndex);
     }
     const uint64_t swapT0 = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2438,13 +2493,15 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
             .count());
     EGLBoolean r = f(dpy, surface);
     if (r) kudroid_note_frame_presented();
+    const uint64_t failures = r ? g_swapFailures.load(std::memory_order_relaxed)
+        : g_swapFailures.fetch_add(1, std::memory_order_relaxed) + 1;
     const uint64_t swapMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count()) -
         swapT0;
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
-    {
+    if (r) {
         // First present is the end of boot: everything before it is startup.
         static std::atomic<bool> s_first{false};
         if (!s_first.exchange(true, std::memory_order_relaxed)) {
@@ -2456,10 +2513,53 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     if (swapMs > 50) {
         gpuLog("eglSwapBuffers slow: %llums", (unsigned long long)swapMs);
     }
-    if ((++g_swapCalls % 120) == 0) {
-        gpuLog("frame census: swaps=%llu draws=%llu clears=%llu",
-               (unsigned long long)g_swapCalls, (unsigned long long)g_drawCalls,
-               (unsigned long long)g_clearCalls);
+    if (swapIndex < 3 || ((swapIndex + 1) % 120) == 0 || (!r && failures <= 3)) {
+        // Presentation summaries must survive the per-call startup log limit.
+        ::kudroid::log::write(::kudroid::log::kInfo, "KuDroidGPU",
+            "frame census: swaps=%llu draws=%llu clears=%llu failures=%llu surface=%p result=%u duration_ms=%llu attempts=%llu vertices=%llu",
+            (unsigned long long)(swapIndex + 1),
+            (unsigned long long)g_drawCalls.load(std::memory_order_relaxed),
+            (unsigned long long)g_clearCalls.load(std::memory_order_relaxed),
+            (unsigned long long)failures, (void*)surface, (unsigned)r,
+            (unsigned long long)swapMs,
+            (unsigned long long)g_drawAttempts.load(std::memory_order_relaxed),
+            (unsigned long long)g_vertexSetups.load(std::memory_order_relaxed));
+        if (r) {
+            using Query = EGLBoolean (*)(EGLDisplay, EGLSurface, EGLint, EGLint*);
+            using Integer = void (*)(unsigned, int*);
+            using String = const char* (*)(unsigned);
+            auto query = reinterpret_cast<Query>(get_egl_func("eglQuerySurface"));
+            auto integer = reinterpret_cast<Integer>(GL_FUNC_CACHED("glGetIntegerv"));
+            auto string = reinterpret_cast<String>(GL_FUNC_CACHED("glGetString"));
+            int width = 0, height = 0, viewport[4] = {}, scissor[4] = {};
+            int framebuffer = 0, program = 0;
+            if (query) {
+                query(dpy, surface, 0x3057 /* EGL_WIDTH */, &width);
+                query(dpy, surface, 0x3056 /* EGL_HEIGHT */, &height);
+            }
+            const char* version = string ? string(0x1f02 /* GL_VERSION */) : nullptr;
+            if (integer && version && (std::strstr(version, "OpenGL ES 2.") ||
+                                       std::strstr(version, "OpenGL ES 3."))) {
+                integer(0x0ba2 /* GL_VIEWPORT */, viewport);
+                integer(0x0c10 /* GL_SCISSOR_BOX */, scissor);
+                integer(0x8ca6 /* GL_FRAMEBUFFER_BINDING */, &framebuffer);
+                integer(0x8b8d /* GL_CURRENT_PROGRAM */, &program);
+            }
+            KLOG(kInfo, "KuDroidGPU",
+                 "submission census: surface=%dx%d viewport=%d,%d,%d,%d scissor=%d,%d,%d,%d "
+                 "fbo=%d program=%d sources=%llu links=%llu binds=%llu buffers=%llu textures=%llu "
+                 "vertex_payload_calls=%llu index_payload_calls=%llu write_maps=%llu",
+                 width, height, viewport[0], viewport[1], viewport[2], viewport[3],
+                 scissor[0], scissor[1], scissor[2], scissor[3], framebuffer, program,
+                 (unsigned long long)g_shaderSources.load(std::memory_order_relaxed),
+                 (unsigned long long)g_programLinks.load(std::memory_order_relaxed),
+                 (unsigned long long)g_programBinds.load(std::memory_order_relaxed),
+                 (unsigned long long)g_bufferUploads.load(std::memory_order_relaxed),
+                 (unsigned long long)g_textureUploads.load(std::memory_order_relaxed),
+                 (unsigned long long)g_vertexPayloadCalls.load(std::memory_order_relaxed),
+                 (unsigned long long)g_indexPayloadCalls.load(std::memory_order_relaxed),
+                 (unsigned long long)g_bufferMapWrites.load(std::memory_order_relaxed));
+        }
     }
     return r;
 }
@@ -2742,6 +2842,7 @@ extern "C" unsigned int bionic_glCreateShader(unsigned int type) {
 }
 
 extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char* const* string, const int* length) {
+    g_shaderSources.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, const char* const*, const int*);
     auto f = (PFN)GL_FUNC_CACHED("glShaderSource");
     if (!f) { EGL_FORWARD_ERR("glShaderSource", ""); return; }
@@ -2861,6 +2962,7 @@ extern "C" void bionic_glAttachShader(unsigned int program, unsigned int shader)
 }
 
 extern "C" void bionic_glLinkProgram(unsigned int program) {
+    g_programLinks.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glLinkProgram");
     if (!f) { EGL_FORWARD_ERR("glLinkProgram", ""); return; }
@@ -2985,9 +3087,28 @@ void audit_material_draw() {
 } // namespace
 
 extern "C" void bionic_glUseProgram(unsigned int program) {
+    g_programBinds.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glUseProgram");
     if (!f) { EGL_FORWARD_ERR("glUseProgram", ""); return; }
+    static std::mutex traceMutex;
+    static std::unordered_map<uintptr_t, unsigned> traceCounts;
+    static std::atomic<unsigned> traceCalls{0};
+    const auto caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+    bool trace = false;
+    if (traceCalls.load(std::memory_order_relaxed) < 128 &&
+        traceCalls.fetch_add(1, std::memory_order_relaxed) < 128) {
+        std::lock_guard<std::mutex> lock(traceMutex);
+        auto it = traceCounts.find(caller);
+        if (it != traceCounts.end()) {
+            if (it->second < 4) { ++it->second; trace = true; }
+        } else if (traceCounts.size() < 32) {
+            traceCounts.emplace(caller, 1);
+            trace = true;
+        }
+    }
+    if (trace) KLOG(kInfo, "KuDroidGPU", "GL program binding: program=%u caller=%p",
+                    program, reinterpret_cast<void*>(caller));
     gpuLog("glUseProgram(prog=%u)", program);
     f(program);
     surface_texture::use_program(program);
@@ -3011,6 +3132,7 @@ extern "C" void bionic_glEnableVertexAttribArray(unsigned int index) {
 }
 
 extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsigned int type, unsigned int normalized, int stride, const void* pointer) {
+    g_vertexSetups.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, unsigned int, unsigned char, int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glVertexAttribPointer");
     if (!f) { EGL_FORWARD_ERR("glVertexAttribPointer", ""); return; }
@@ -3034,16 +3156,22 @@ extern "C" void bionic_glClear(unsigned int mask) {
     typedef void (*PFN)(unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glClear");
     if (!f) { EGL_FORWARD_ERR("glClear", ""); return; }
-    ++g_clearCalls;
+    g_clearCalls.fetch_add(1, std::memory_order_relaxed);
     f(mask);
 }
 
 extern "C" void bionic_glDrawArrays(unsigned int mode, int first, int count) {
+    g_drawAttempts.fetch_add(1, std::memory_order_relaxed);
     surface_texture::DrawScope external;
     typedef void (*PFN)(unsigned int, int, int);
     auto f = (PFN)GL_FUNC_CACHED("glDrawArrays");
-    if (!f) { EGL_FORWARD_ERR("glDrawArrays", ""); return; }
-    ++g_drawCalls;
+    if (!f) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true, std::memory_order_relaxed))
+            KLOG(kError, "KuDroidGPU", "GL draw backend unavailable: glDrawArrays");
+        return;
+    }
+    g_drawCalls.fetch_add(1, std::memory_order_relaxed);
     audit_material_draw();
     gpuLog("glDrawArrays(mode=0x%x first=%d count=%d): calling ANGLE...", mode, first, count);
 #if defined(__APPLE__)
@@ -3080,10 +3208,12 @@ extern "C" void bionic_glBindBuffer(unsigned int target, unsigned int buffer) {
 }
 
 extern "C" void bionic_glBufferData(unsigned int target, long size, const void* data, unsigned int usage) {
+    g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, long, const void*, unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glBufferData");
     if (!f) { EGL_FORWARD_ERR("glBufferData", ""); return; }
     gpuLog("glBufferData(target=0x%x size=%ld usage=0x%x)", target, size, usage);
+    trace_buffer_payload("glBufferData", target, 0, size, data, __builtin_return_address(0));
     f(target, size, data, usage);
 }
 
@@ -3107,6 +3237,7 @@ extern "C" void bionic_glDeleteTextures(int n, const unsigned int* textures) {
     if (f) f(n, textures);
 }
 extern "C" void bionic_glTexImage2D(unsigned int target, int level, int internalformat, int width, int height, int border, unsigned int format, unsigned int type, const void* pixels) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glTexImage2D");
     if (gpu_diag_enabled()) {
@@ -3115,6 +3246,7 @@ extern "C" void bionic_glTexImage2D(unsigned int target, int level, int internal
     if (f) f(target, level, internalformat, width, height, border, format, type, pixels);
 }
 extern "C" void bionic_glTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, unsigned int type, const void* pixels) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glTexSubImage2D");
     if (gpu_diag_enabled()) {
@@ -3162,11 +3294,13 @@ extern "C" void bionic_glPixelStorei(unsigned int pname, int param) {
     if (f) f(pname, param);
 }
 extern "C" void bionic_glCompressedTexImage2D(unsigned int target, int level, unsigned int internalformat, int width, int height, int border, int imageSize, const void* data) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, unsigned int, int, int, int, int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glCompressedTexImage2D");
     if (f) f(target, level, internalformat, width, height, border, imageSize, data);
 }
 extern "C" void bionic_glCompressedTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, int imageSize, const void* data) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glCompressedTexSubImage2D");
     if (f) f(target, level, xoffset, yoffset, width, height, format, imageSize, data);
@@ -3179,16 +3313,26 @@ extern "C" void bionic_glDeleteBuffers(int n, const unsigned int* buffers) {
     if (f) f(n, buffers);
 }
 extern "C" void bionic_glBufferSubData(unsigned int target, long offset, long size, const void* data) {
+    g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, long, long, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glBufferSubData");
-    if (f) f(target, offset, size, data);
+    if (f) {
+        trace_buffer_payload("glBufferSubData", target, offset, size, data, __builtin_return_address(0));
+        f(target, offset, size, data);
+    }
 }
 extern "C" void bionic_glDrawElements(unsigned int mode, int count, unsigned int type, const void* indices) {
+    g_drawAttempts.fetch_add(1, std::memory_order_relaxed);
     surface_texture::DrawScope external;
     typedef void (*PFN)(unsigned int, int, unsigned int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glDrawElements");
-    if (!f) return;
-    ++g_drawCalls;
+    if (!f) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true, std::memory_order_relaxed))
+            KLOG(kError, "KuDroidGPU", "GL draw backend unavailable: glDrawElements");
+        return;
+    }
+    g_drawCalls.fetch_add(1, std::memory_order_relaxed);
     audit_material_draw();
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
@@ -3480,6 +3624,18 @@ extern "C" void bionic_glGetIntegerv(unsigned int pname, int* params) {
     if (surface_texture::binding(pname, params)) return;
     typedef void (*PFN)(unsigned int, int*);
     auto f = (PFN)GL_FUNC_CACHED("glGetIntegerv");
+    if (f && params && pname == 0x821D /* GL_NUM_EXTENSIONS */) {
+        // Read into a local so a rejected query never walks the caller's stale value.
+        int total = 0;
+        f(pname, &total);
+        typedef const char* (*Stringi)(unsigned int, unsigned int);
+        auto stringi = (Stringi)GL_FUNC_CACHED("glGetStringi");
+        int hidden = 0;
+        for (int i = 0; stringi && i < total; ++i)
+            hidden += gl_extension_hidden(stringi(0x1F03, static_cast<unsigned>(i)));
+        if (total > 0) *params = total - hidden;
+        return;
+    }
     if (f) f(pname, params);
     if (f && params && pname == 0x87ff) {
         int count = 0;
@@ -3562,21 +3718,47 @@ extern "C" void bionic_glGetBooleanv(unsigned int pname, unsigned char* params) 
 extern "C" const char* bionic_glGetString(unsigned int name) {
     typedef const char* (*PFN)(unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glGetString");
-    return f ? f(name) : nullptr;
+    const char* s = f ? f(name) : nullptr;
+    return name == 0x1F03 /* GL_EXTENSIONS */ ? gl_context_extensions(s) : s;
 }
+// Indexed extension queries skip hidden entries so they match the filtered string.
 extern "C" const char* bionic_glGetStringi(unsigned int name, unsigned int index) {
     typedef const char* (*PFN)(unsigned int, unsigned int);
+    typedef void (*Count)(unsigned int, int*);
     auto f = (PFN)GL_FUNC_CACHED("glGetStringi");
-    return f ? f(name, index) : nullptr;
+    if (!f) return nullptr;
+    if (name != 0x1F03 /* GL_EXTENSIONS */) return f(name, index);
+    auto count = (Count)GL_FUNC_CACHED("glGetIntegerv");
+    int total = 0;
+    if (count) count(0x821D /* GL_NUM_EXTENSIONS */, &total);
+    unsigned visible = 0;
+    for (int i = 0; i < total; ++i) {
+        const char* s = f(name, static_cast<unsigned>(i));
+        if (gl_extension_hidden(s)) continue;
+        if (visible++ == index) return s;
+    }
+    // Out of range: let the backend raise GL_INVALID_VALUE.
+    return f(name, static_cast<unsigned>(total > 0 ? total : 0));
 }
 extern "C" unsigned int bionic_glGetError(void) {
     typedef unsigned int (*PFN)(void);
     auto f = (PFN)GL_FUNC_CACHED("glGetError");
     if (f) {
         const unsigned error = f();
-        static std::atomic<unsigned> count{0};
-        if (error && count.fetch_add(1, std::memory_order_relaxed) < 32)
-            KLOG(kError, "KuDroidGPU", "GL error reported to guest: 0x%x", error);
+        if (error) {
+            // Keep later failures visible after capability probing.
+            static std::mutex mutex;
+            static std::unordered_map<uintptr_t, unsigned> counts;
+            const auto caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+            unsigned count = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (counts.size() < 64 || counts.count(caller)) count = ++counts[caller];
+            }
+            if (count && (count <= 4 || count % 120 == 0))
+                KLOG(kError, "KuDroidGPU", "GL error reported to guest: 0x%x caller=%p occurrence=%u",
+                     error, reinterpret_cast<void*>(caller), count);
+        }
         return error;
     }
     return 0;
@@ -3606,10 +3788,16 @@ extern "C" void bionic_glDetachShader(unsigned int program, unsigned int shader)
 // Preserve extension entry points: their validation differs from core GLES.
 #define EXTERNAL_DRAW(name, parameters, arguments) \
     extern "C" void bionic_##name parameters { \
+        g_drawAttempts.fetch_add(1, std::memory_order_relaxed); \
         surface_texture::DrawScope external; \
         using Fn = void (*) parameters; \
         auto f = reinterpret_cast<Fn>(GL_FUNC_CACHED(#name)); \
-        if (f) { ++g_drawCalls; audit_material_draw(); f arguments; } \
+        if (f) { g_drawCalls.fetch_add(1, std::memory_order_relaxed); audit_material_draw(); f arguments; } \
+        else { \
+            static std::atomic<bool> reported{false}; \
+            if (!reported.exchange(true, std::memory_order_relaxed)) \
+                KLOG(kError, "KuDroidGPU", "GL draw backend unavailable: %s", #name); \
+        } \
     }
 EXTERNAL_DRAW(glDrawArraysInstanced, (unsigned mode, int first, int count, int instances), (mode, first, count, instances))
 EXTERNAL_DRAW(glDrawArraysInstancedANGLE, (unsigned mode, int first, int count, int instances), (mode, first, count, instances))
@@ -3670,8 +3858,32 @@ extern "C" void bionic_glVertexAttribDivisor(unsigned int index, unsigned int di
 extern "C" void* bionic_glMapBufferRange(unsigned int target, long offset, long length, unsigned int access) {
     typedef void* (*PFN)(unsigned int, long, long, unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glMapBufferRange");
-    if (f) return f(target, offset, length, access);
-    return nullptr;
+    void* result = f ? f(target, offset, length, access) : nullptr;
+    if (result && (access & 0x0002 /* GL_MAP_WRITE_BIT */))
+        g_bufferMapWrites.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<unsigned> calls{0};
+    if (calls.fetch_add(1, std::memory_order_relaxed) < 64)
+        KLOG(kInfo, "KuDroidGPU", "GL buffer map: target=0x%x offset=%ld length=%ld access=0x%x result=%p caller=%p",
+             target, offset, length, access, result, __builtin_return_address(0));
+    return result;
+}
+
+extern "C" void bionic_glPushDebugGroup(unsigned source, unsigned id, int length, const char* message) {
+    using Fn = void (*)(unsigned, unsigned, int, const char*);
+    auto f = reinterpret_cast<Fn>(GL_FUNC_CACHED("glPushDebugGroup"));
+    if (!f) return;
+    static std::atomic<unsigned> calls{0}, logged{0};
+    trace_gl_label("glPushDebugGroup", source, id, length, message, calls, logged);
+    f(source, id, length, message);
+}
+
+extern "C" void bionic_glObjectLabel(unsigned identifier, unsigned name, int length, const char* label) {
+    using Fn = void (*)(unsigned, unsigned, int, const char*);
+    auto f = reinterpret_cast<Fn>(GL_FUNC_CACHED("glObjectLabel"));
+    if (!f) return;
+    static std::atomic<unsigned> calls{0}, logged{0};
+    trace_gl_label("glObjectLabel", identifier, name, length, label, calls, logged);
+    f(identifier, name, length, label);
 }
 extern "C" unsigned char bionic_glUnmapBuffer(unsigned int target) {
     typedef unsigned char (*PFN)(unsigned int);
@@ -3697,26 +3909,31 @@ extern "C" void bionic_glFlushMappedBufferRange(unsigned int target, long offset
 
 // ── GLES 3.0: 3D Textures & Immutable Storage & Samplers ────────────────────
 extern "C" void bionic_glTexImage3D(unsigned int target, int level, int internalformat, int width, int height, int depth, int border, unsigned int format, unsigned int type, const void* pixels) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glTexImage3D");
     if (f) f(target, level, internalformat, width, height, depth, border, format, type, pixels);
 }
 extern "C" void bionic_glTexSubImage3D(unsigned int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, unsigned int format GL_STACK_PAD, unsigned int type GL_STACK_PAD, const void* pixels) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glTexSubImage3D");
     if (f) f(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
 }
 extern "C" void bionic_glTexSubImage3DOES(unsigned int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, unsigned int format GL_STACK_PAD, unsigned int type GL_STACK_PAD, const void* pixels) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glTexSubImage3DOES");
     if (f) f(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
 }
 extern "C" void bionic_glCompressedTexSubImage3D(unsigned int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, unsigned int format GL_STACK_PAD, int imageSize GL_STACK_PAD, const void* data) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, int, unsigned int, int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glCompressedTexSubImage3D");
     if (f) f(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
 }
 extern "C" void bionic_glCompressedTexSubImage3DOES(unsigned int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, unsigned int format GL_STACK_PAD, int imageSize GL_STACK_PAD, const void* data) {
+    g_textureUploads.fetch_add(1, std::memory_order_relaxed);
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, int, unsigned int, int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glCompressedTexSubImage3DOES");
     if (f) f(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);

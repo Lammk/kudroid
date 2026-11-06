@@ -42,7 +42,6 @@ public class Window {
     private final ArrayList<SurfaceCallbackState> mSurfaceCallbacks =
             new ArrayList<SurfaceCallbackState>();
     private SurfaceHolder.Callback mTakeSurfaceCallback;
-    private SurfaceHolder.Callback mActivitySurfaceCallback;
     private final Surface mSurface = new Surface();
     private SurfaceHolder mSurfaceHolder;
     private View mAttachedDecor;
@@ -115,14 +114,6 @@ public class Window {
         if (mTakeSurfaceCallback == callback) return;
         if (mTakeSurfaceCallback != null) removeSurfaceCallback(mTakeSurfaceCallback);
         mTakeSurfaceCallback = callback;
-        if (callback != null) addSurfaceCallback(callback);
-    }
-
-    /** Register the Activity's Window-surface callbacks when it implements them. */
-    public void setActivitySurfaceCallback(SurfaceHolder.Callback callback) {
-        if (mActivitySurfaceCallback == callback) return;
-        if (mActivitySurfaceCallback != null) removeSurfaceCallback(mActivitySurfaceCallback);
-        mActivitySurfaceCallback = callback;
         if (callback != null) addSurfaceCallback(callback);
     }
 

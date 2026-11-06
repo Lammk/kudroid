@@ -826,7 +826,7 @@ bool exitsWindow(const std::uint32_t* code, std::size_t n, std::size_t i) {
     return i + 1 >= n;
 }
 
-// Rewrite one function range in place. Returns sites renamed, or -1 to skip
+// Returns renamed sites, zero when no rewrite is needed, or -1 to skip
 // (reason stored in why when provided).
 long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                   const char** why = nullptr,
@@ -937,7 +937,8 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
             return -1;
         }
         for (unsigned k = 0; k < d.npatch; ++k) {
-            refs.push_back({i, d.at[k], (d.defmask & (1u << k)) != 0});
+            if (((words[i] >> d.at[k]) & 31u) == kX18)
+                refs.push_back({i, d.at[k], (d.defmask & (1u << k)) != 0});
         }
         for (unsigned k = 0; k < d.nuse; ++k) {
             const unsigned pos = d.useonly[k];
@@ -1491,7 +1492,7 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
         if (sites > 0) {
             ++st.rewritten;
             st.sites += static_cast<std::uint64_t>(sites);
-        } else {
+        } else if (sites < 0) {
             x18::collectVirtualSites(reinterpret_cast<const std::uint32_t*>(segBase + segOff),
                                      len / 4, static_cast<std::size_t>(r.start - imgAddr), virtualSites);
         }
@@ -1636,7 +1637,7 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
                 if (sites > 0) {
                     ++st.rewritten;
                     st.sites += static_cast<std::uint64_t>(sites);
-                } else {
+                } else if (sites < 0) {
                     x18::collectVirtualSites(words + cs, ce - cs,
                         static_cast<std::size_t>(seg.vaddr - minVaddr) + cs * 4, virtualSites);
                 }

@@ -83,9 +83,17 @@ void kuart_register_component_meta_data_typed(const char* component_name,
 void kuart_register_package(const char* package_name,
                             const char* const* activities,
                             int activity_count);
+void kuart_register_package_with_state(const char* package_name, const char* const* activities,
+                                       int activity_count, int application_enabled);
 
 // An empty component names the application theme.
 void kuart_register_theme(const char* component_name, unsigned int resource_id);
+
+// Register manifest services and action/category filters before component startup.
+void kuart_register_service(const char* name, int enabled, int exported, const char* permission);
+void kuart_register_service_intent_filter(const char* name, const char* const* actions,
+                                         int action_count, const char* const* categories,
+                                         int category_count, int priority, int has_data);
 
 // Manifest version + install times. All fall back when unparseable.
 void kuart_register_package_info(const char* package_name, int version_code,

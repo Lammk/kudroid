@@ -1,0 +1,277 @@
+diff --git a/src/libANGLE/renderer/vulkan/ios/DisplayVkIOS.h b/src/libANGLE/renderer/vulkan/ios/DisplayVkIOS.h
+new file mode 100644
+--- /dev/null
++++ b/src/libANGLE/renderer/vulkan/ios/DisplayVkIOS.h
+@@ -0,0 +1,25 @@
++// Copyright 2026 The ANGLE Project Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef LIBANGLE_RENDERER_VULKAN_IOS_DISPLAYVKIOS_H_
++#define LIBANGLE_RENDERER_VULKAN_IOS_DISPLAYVKIOS_H_
++
++#include "libANGLE/renderer/vulkan/DisplayVk.h"
++
++namespace rx
++{
++class DisplayVkIOS final : public DisplayVk
++{
++  public:
++    explicit DisplayVkIOS(const egl::DisplayState &state);
++    bool isValidNativeWindow(EGLNativeWindowType window) const override;
++    SurfaceImpl *createWindowSurfaceVk(const egl::SurfaceState &state,
++                                       EGLNativeWindowType window) override;
++    egl::ConfigSet generateConfigs() override;
++    void checkConfigSupport(egl::Config *config) override;
++    const char *getWSIExtension() const override;
++};
++}
++
++#endif
+diff --git a/src/libANGLE/renderer/vulkan/ios/DisplayVkIOS.mm b/src/libANGLE/renderer/vulkan/ios/DisplayVkIOS.mm
+new file mode 100644
+--- /dev/null
++++ b/src/libANGLE/renderer/vulkan/ios/DisplayVkIOS.mm
+@@ -0,0 +1,58 @@
++// Copyright 2026 The ANGLE Project Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "libANGLE/renderer/vulkan/ios/DisplayVkIOS.h"
++
++#import <QuartzCore/CAMetalLayer.h>
++
++#include "libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.h"
++#include "libANGLE/renderer/vulkan/vk_caps_utils.h"
++
++namespace rx
++{
++DisplayVkIOS::DisplayVkIOS(const egl::DisplayState &state) : DisplayVk(state) {}
++
++bool DisplayVkIOS::isValidNativeWindow(EGLNativeWindowType window) const
++{
++    NSObject *layer = reinterpret_cast<NSObject *>(window);
++    return layer != nil && [layer isKindOfClass:[CAMetalLayer class]];
++}
++
++SurfaceImpl *DisplayVkIOS::createWindowSurfaceVk(const egl::SurfaceState &state,
++                                                 EGLNativeWindowType window)
++{
++    ASSERT(isValidNativeWindow(window));
++    return new WindowSurfaceVkIOS(state, window);
++}
++
++egl::ConfigSet DisplayVkIOS::generateConfigs()
++{
++    constexpr GLenum kColorFormats[] = {GL_BGRA8_EXT, GL_BGRX8_ANGLEX};
++    return egl_vk::GenerateConfigs(kColorFormats, egl_vk::kConfigDepthStencilFormats, this);
++}
++
++void DisplayVkIOS::checkConfigSupport(egl::Config *config)
++{
++    if (config->renderTargetFormat != GL_BGRA8_EXT &&
++        config->renderTargetFormat != GL_BGRX8_ANGLEX)
++    {
++        config->surfaceType &= ~EGL_WINDOW_BIT;
++    }
++}
++
++const char *DisplayVkIOS::getWSIExtension() const
++{
++    return VK_EXT_METAL_SURFACE_EXTENSION_NAME;
++}
++
++bool IsVulkanIOSDisplayAvailable()
++{
++    return true;
++}
++
++DisplayImpl *CreateVulkanIOSDisplay(const egl::DisplayState &state)
++{
++    return new DisplayVkIOS(state);
++}
++}
+diff --git a/src/libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.h b/src/libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.h
+new file mode 100644
+--- /dev/null
++++ b/src/libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 The ANGLE Project Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef LIBANGLE_RENDERER_VULKAN_IOS_WINDOWSURFACEVKIOS_H_
++#define LIBANGLE_RENDERER_VULKAN_IOS_WINDOWSURFACEVKIOS_H_
++
++#import <QuartzCore/CAMetalLayer.h>
++
++#include "libANGLE/renderer/vulkan/SurfaceVk.h"
++
++namespace rx
++{
++class WindowSurfaceVkIOS final : public WindowSurfaceVk
++{
++  public:
++    WindowSurfaceVkIOS(const egl::SurfaceState &state, EGLNativeWindowType window);
++    ~WindowSurfaceVkIOS() override;
++
++  private:
++    angle::Result createSurfaceVk(vk::ErrorContext *context) override;
++    angle::Result getCurrentWindowSize(vk::ErrorContext *context,
++                                       gl::Extents *extentsOut) const override;
++    CAMetalLayer *mMetalLayer;
++};
++}
++
++#endif
+diff --git a/src/libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.mm b/src/libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.mm
+new file mode 100644
+--- /dev/null
++++ b/src/libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.mm
+@@ -0,0 +1,52 @@
++// Copyright 2026 The ANGLE Project Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "libANGLE/renderer/vulkan/ios/WindowSurfaceVkIOS.h"
++
++#include <cmath>
++#include <limits>
++
++#include "libANGLE/renderer/vulkan/vk_renderer.h"
++#include "libANGLE/renderer/vulkan/vk_utils.h"
++
++namespace rx
++{
++WindowSurfaceVkIOS::WindowSurfaceVkIOS(const egl::SurfaceState &state,
++                                       EGLNativeWindowType window)
++    : WindowSurfaceVk(state, window),
++      mMetalLayer([reinterpret_cast<CAMetalLayer *>(window) retain])
++{}
++
++WindowSurfaceVkIOS::~WindowSurfaceVkIOS()
++{
++    [mMetalLayer release];
++}
++
++angle::Result WindowSurfaceVkIOS::createSurfaceVk(vk::ErrorContext *context)
++{
++    ANGLE_VK_CHECK(context, mMetalLayer != nil, VK_ERROR_INITIALIZATION_FAILED);
++    // Reuse the layer already attached and sized by the window owner.
++    VkMetalSurfaceCreateInfoEXT createInfo = {};
++    createInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
++    createInfo.pLayer = mMetalLayer;
++    ANGLE_VK_TRY(context, VK_CALL(vkCreateMetalSurfaceEXT,
++                                  context->getRenderer()->getInstance(),
++                                  &createInfo, nullptr, &mSurface));
++    return angle::Result::Continue;
++}
++
++angle::Result WindowSurfaceVkIOS::getCurrentWindowSize(vk::ErrorContext *context,
++                                                       gl::Extents *extentsOut) const
++{
++    ANGLE_VK_CHECK(context, mMetalLayer != nil, VK_ERROR_INITIALIZATION_FAILED);
++    const CGSize size = mMetalLayer.drawableSize;
++    const double maximum = std::numeric_limits<int>::max();
++    ANGLE_VK_CHECK(context, std::isfinite(size.width) && std::isfinite(size.height) &&
++                               size.width >= 0 && size.height >= 0 &&
++                               size.width <= maximum && size.height <= maximum,
++                   VK_ERROR_INITIALIZATION_FAILED);
++    *extentsOut = gl::Extents(static_cast<int>(size.width), static_cast<int>(size.height), 1);
++    return angle::Result::Continue;
++}
++}
+diff --git a/src/libANGLE/Display.cpp b/src/libANGLE/Display.cpp
+--- a/src/libANGLE/Display.cpp
++++ b/src/libANGLE/Display.cpp
+@@ -802,6 +802,12 @@
+                 impl = rx::CreateVulkanFuchsiaDisplay(state);
+             }
+             break;
++#    elif defined(ANGLE_PLATFORM_IOS_FAMILY)
++            if (rx::IsVulkanIOSDisplayAvailable())
++            {
++                impl = rx::CreateVulkanIOSDisplay(state);
++            }
++            break;
+ #    elif defined(ANGLE_PLATFORM_APPLE)
+             if (rx::IsVulkanMacDisplayAvailable())
+             {
+diff --git a/src/libANGLE/renderer/vulkan/DisplayVk_api.h b/src/libANGLE/renderer/vulkan/DisplayVk_api.h
+--- a/src/libANGLE/renderer/vulkan/DisplayVk_api.h
++++ b/src/libANGLE/renderer/vulkan/DisplayVk_api.h
+@@ -53,7 +53,10 @@
+ DisplayImpl *CreateVulkanFuchsiaDisplay(const egl::DisplayState &state);
+ #endif  // defined(ANGLE_PLATFORM_FUCHSIA)
+ 
+-#if defined(ANGLE_PLATFORM_APPLE)
++#if defined(ANGLE_PLATFORM_IOS_FAMILY)
++bool IsVulkanIOSDisplayAvailable();
++DisplayImpl *CreateVulkanIOSDisplay(const egl::DisplayState &state);
++#elif defined(ANGLE_PLATFORM_APPLE)
+ bool IsVulkanMacDisplayAvailable();
+ DisplayImpl *CreateVulkanMacDisplay(const egl::DisplayState &state);
+ #endif  // defined(ANGLE_PLATFORM_APPLE)
+diff --git a/src/libANGLE/renderer/vulkan/vulkan_backend.gni b/src/libANGLE/renderer/vulkan/vulkan_backend.gni
+--- a/src/libANGLE/renderer/vulkan/vulkan_backend.gni
++++ b/src/libANGLE/renderer/vulkan/vulkan_backend.gni
+@@ -234,3 +234,12 @@
+     "mac/WindowSurfaceVkMac.mm",
+   ]
+ }
++
++if (is_ios) {
++  vulkan_backend_sources += [
++    "ios/DisplayVkIOS.h",
++    "ios/DisplayVkIOS.mm",
++    "ios/WindowSurfaceVkIOS.h",
++    "ios/WindowSurfaceVkIOS.mm",
++  ]
++}
+diff --git a/src/third_party/volk/BUILD.gn b/src/third_party/volk/BUILD.gn
+--- a/src/third_party/volk/BUILD.gn
++++ b/src/third_party/volk/BUILD.gn
+@@ -10,6 +10,9 @@
+ 
+ config("volk_config") {
+   include_dirs = [ "src" ]
++  if (is_ios) {
++    defines = [ "VK_USE_PLATFORM_METAL_EXT" ]
++  }
+ }
+ 
+ source_set("volk") {
+diff --git a/src/common/vulkan/libvulkan_loader.cpp b/src/common/vulkan/libvulkan_loader.cpp
+--- a/src/common/vulkan/libvulkan_loader.cpp
++++ b/src/common/vulkan/libvulkan_loader.cpp
+@@ -17,6 +17,9 @@
+ {
+ void *OpenLibVulkan()
+ {
++#if defined(ANGLE_PLATFORM_IOS_FAMILY)
++    return OpenSystemLibraryWithExtension("MoltenVK.framework/MoltenVK", SearchType::ModuleDir);
++#else
+     constexpr const char *kLibVulkanNames[] = {
+ #if defined(ANGLE_PLATFORM_WINDOWS)
+         "vulkan-1.dll",
+@@ -54,6 +57,7 @@
+     }
+ 
+     return nullptr;
++#endif
+ }
+ }  // namespace vk
+ }  // namespace angle
+diff --git a/src/libANGLE/renderer/vulkan/BUILD.gn b/src/libANGLE/renderer/vulkan/BUILD.gn
+--- a/src/libANGLE/renderer/vulkan/BUILD.gn
++++ b/src/libANGLE/renderer/vulkan/BUILD.gn
+@@ -71,6 +71,9 @@
+ 
+ config("angle_vulkan_backend_config") {
+   defines = [ "ANGLE_ENABLE_VULKAN" ]
++  if (is_ios) {
++    ldflags = [ "-framework", "Metal", "-framework", "QuartzCore" ]
++  }
+   if (angle_enable_swiftshader) {
+     defines += [ "ANGLE_ENABLE_SWIFTSHADER" ]
+   }

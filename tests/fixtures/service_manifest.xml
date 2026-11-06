@@ -1,0 +1,16 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="test.services">
+  <application android:enabled="false" android:permission="test.permission">
+    <activity android:name=".Main">
+      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+    </activity>
+    <service android:name=".Worker" android:exported="false">
+      <meta-data android:name="worker.key" android:value="worker.value"/>
+      <intent-filter android:priority="7"><action android:name="test.services.BIND"/><category android:name="test.category"/></intent-filter>
+      <intent-filter android:priority="-3"><action android:name="test.services.DATA"/><data android:scheme="https"/></intent-filter>
+    </service>
+    <service android:name="Other" android:enabled="false" android:permission="">
+      <intent-filter><action android:name="test.services.OTHER"/></intent-filter>
+    </service>
+    <service android:name="test.services.Explicit"/>
+  </application>
+</manifest>

@@ -995,30 +995,7 @@ public final class ActivityThread {
             window.updateSurfaceSize(width, height, surfaceReady);
             window.measureAndLayout();
 
-            android.view.SurfaceView foundSv = findSurfaceView(activity);
-            if (foundSv != null) {
-                int svW = foundSv.getWidth() > 0 ? foundSv.getWidth() : width;
-                int svH = foundSv.getHeight() > 0 ? foundSv.getHeight() : height;
-                foundSv.dispatchSurfaceReady(svW, svH);
-            }
-
-            if (activity instanceof android.view.SurfaceHolder.Callback) {
-                android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) activity;
-                android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
-                    (((Object) activity instanceof android.view.SurfaceView) ?
-                        ((android.view.SurfaceView) (Object) activity).getHolder() :
-                        new android.view.SurfaceView(activity).getHolder());
-                int surfaceW = foundSv != null && foundSv.getWidth() > 0 ? foundSv.getWidth() : width;
-                int surfaceH = foundSv != null && foundSv.getHeight() > 0 ? foundSv.getHeight() : height;
-                if (surfaceW <= 0) surfaceW = 1080;
-                if (surfaceH <= 0) surfaceH = 1920;
-                cb.surfaceCreated(holder);
-                cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
-                if (cb instanceof android.view.SurfaceHolder.Callback2) {
-                    ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
-                }
-            }
-
+            updateViewSurfaces(window.getDecorView(), window.hasSurface());
             window.dispatchSurfaceReady();
             activity.performWindowFocusChanged(true);
         } catch (Throwable st) {
@@ -1383,9 +1360,12 @@ public final class ActivityThread {
     private final java.util.HashMap<android.content.ServiceConnection, String> mConnectionTargets =
             new java.util.HashMap<android.content.ServiceConnection, String>();
 
-    private static String serviceClassName(android.content.Intent intent) {
-        final android.content.ComponentName c = intent != null ? intent.getComponent() : null;
-        return c != null ? c.getClassName() : null;
+    private android.content.ComponentName resolveServiceComponent(android.content.Intent intent,
+            android.content.Context context) {
+        if (intent == null) return null;
+        android.content.pm.ResolveInfo resolved = context.getPackageManager().resolveService(intent, 0);
+        android.content.pm.ServiceInfo info = resolved != null ? resolved.serviceInfo : null;
+        return info != null ? new android.content.ComponentName(info.packageName, info.name) : null;
     }
 
     private void postToMain(Runnable r) {
@@ -1397,7 +1377,8 @@ public final class ActivityThread {
     }
 
     /** Creates the service and runs onCreate(), or returns the existing instance. */
-    private ServiceRecord ensureService(String className, android.content.Intent intent) {
+    private ServiceRecord ensureService(String className, android.content.Intent intent,
+            android.content.ComponentName component) {
         ServiceRecord record;
         synchronized (mServiceRecords) {
             record = mServiceRecords.get(className);
@@ -1425,7 +1406,7 @@ public final class ActivityThread {
             return null;
         }
         record = new ServiceRecord(className, service);
-        record.component = intent.getComponent();
+        record.component = component;
         service.attach(new ApplicationContext(), this, className, mApplication);
         synchronized (mServiceRecords) {
             mServiceRecords.put(className, record);
@@ -1455,18 +1436,15 @@ public final class ActivityThread {
         }
     }
 
-    /** Context.startService: only intents that name their component can be resolved. */
+    /** Resolve declared services before scheduling their lifecycle. */
     public android.content.ComponentName startServiceFromApp(final android.content.Intent intent,
             android.content.Context context) {
-        final String className = serviceClassName(intent);
-        if (className == null) {
-            android.util.Log.w("ActivityThread",
-                    "startService needs an explicit component; implicit intent ignored: " + intent);
-            return null;
-        }
+        final android.content.ComponentName component = resolveServiceComponent(intent, context);
+        if (component == null) return null;
+        final String className = component.getClassName();
         postToMain(new Runnable() {
             public void run() {
-                final ServiceRecord record = ensureService(className, intent);
+                final ServiceRecord record = ensureService(className, intent, component);
                 if (record == null) {
                     return;
                 }
@@ -1481,14 +1459,14 @@ public final class ActivityThread {
                 }
             }
         });
-        return intent.getComponent();
+        return component;
     }
 
     public boolean stopServiceFromApp(android.content.Intent intent) {
-        final String className = serviceClassName(intent);
-        if (className == null) {
-            return false;
-        }
+        final android.content.ComponentName component =
+                resolveServiceComponent(intent, new ApplicationContext());
+        if (component == null) return false;
+        final String className = component.getClassName();
         final boolean running;
         synchronized (mServiceRecords) {
             running = mServiceRecords.containsKey(className);
@@ -1525,10 +1503,10 @@ public final class ActivityThread {
     public boolean bindServiceFromApp(final android.content.Intent intent,
             final android.content.ServiceConnection conn, final int flags,
             android.content.Context context) {
-        final String className = serviceClassName(intent);
-        if (className == null || conn == null) {
-            return false;
-        }
+        if (conn == null) return false;
+        final android.content.ComponentName component = resolveServiceComponent(intent, context);
+        if (component == null) return false;
+        final String className = component.getClassName();
         synchronized (mServiceRecords) {
             mConnectionTargets.put(conn, className);
         }
@@ -1539,7 +1517,7 @@ public final class ActivityThread {
                     return;
                 }
                 if (record == null) {
-                    record = ensureService(className, intent);
+                    record = ensureService(className, intent, component);
                 }
                 if (record == null) {
                     return;
@@ -1557,7 +1535,7 @@ public final class ActivityThread {
                         record.binder = null;
                     }
                 }
-                final android.content.ComponentName name = intent.getComponent();
+                final android.content.ComponentName name = record.component;
                 try {
                     if (record.binder != null) {
                         conn.onServiceConnected(name, record.binder);

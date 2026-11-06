@@ -15,6 +15,7 @@ public:
 
     std::size_t pageSize() const { return pageSize_; }
     bool prepare(std::size_t length, std::size_t alignment);
+    bool releasePrepared();
     void* reserve(std::size_t length, std::size_t alignment, void* hint = nullptr);
     bool release(void* address, std::size_t length);
     bool protect(void* address, std::size_t length, int permissions);

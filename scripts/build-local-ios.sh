@@ -21,6 +21,7 @@ BUILD_TYPE="Release"
 CONFIG="debug"
 DO_RUN=false
 DO_CLEAN=false
+GLES_BACKEND="metal"
 
 for arg in "$@"; do
     case "${arg}" in
@@ -38,8 +39,11 @@ for arg in "$@"; do
         --clean)
             DO_CLEAN=true
             ;;
+        --gles-backend=metal|--gles-backend=vulkan)
+            GLES_BACKEND="${arg#*=}"
+            ;;
         -h|--help)
-            echo "Usage: $0 [--release|--debug] [--run] [--clean]"
+            echo "Usage: $0 [--release|--debug] [--run] [--clean] [--gles-backend=metal|vulkan]"
             exit 0
             ;;
         *)
@@ -66,6 +70,7 @@ echo "========================================================"
 echo "==> [1/3] Configuring & building kudroid_core with CMake..."
 cmake -B build-ios -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=cmake/ios-linux-toolchain.cmake \
+    -DKUDROID_GLES_BACKEND="${GLES_BACKEND}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
 
 cmake --build build-ios --target kudroid_core -j"$(nproc)"

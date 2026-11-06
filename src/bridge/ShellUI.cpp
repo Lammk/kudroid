@@ -15,6 +15,7 @@
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
 extern "C" void kudroid_gpu_warmup_egl(void);
+extern "C" void kudroid_gpu_prepare_egl(void);
 extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int height);
 extern "C" void kudroid_gpu_resize_native_windows(void* layer, int oldW, int oldH,
                                                   int width, int height);
@@ -86,8 +87,11 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
                                           width, height);
     }
 
-    // EGL warmup runs after the display is created.
-    // kudroid_gpu_warmup_egl();
+#if defined(KUDROID_GLES_USE_VULKAN) && KUDROID_GLES_USE_VULKAN
+    if (layer) {
+        kudroid_gpu_prepare_egl();
+    }
+#endif
     if (layer != previousLayer || width != previousWidth || height != previousHeight) {
         kuart_post_surface_changed();
     }

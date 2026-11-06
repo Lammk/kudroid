@@ -93,6 +93,7 @@ SecKeyRef AppleKey(Bytes pkcs1) {
 
 SecKeyAlgorithm Algorithm(const char* name) {
     if (!name) return nullptr;
+    if (!std::strcmp(name, "SHA1withRSA")) return kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA1;
     if (!std::strcmp(name, "SHA224withRSA")) return kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA224;
     if (!std::strcmp(name, "SHA256withRSA")) return kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256;
     if (!std::strcmp(name, "SHA384withRSA")) return kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA384;
@@ -113,6 +114,7 @@ Key OpenSslKey(Bytes der) {
 }
 const EVP_MD* Algorithm(const char* name) {
     if (!name) return nullptr;
+    if (!std::strcmp(name, "SHA1withRSA")) return EVP_sha1();
     if (!std::strcmp(name, "SHA224withRSA")) return EVP_sha224();
     if (!std::strcmp(name, "SHA256withRSA")) return EVP_sha256();
     if (!std::strcmp(name, "SHA384withRSA")) return EVP_sha384();

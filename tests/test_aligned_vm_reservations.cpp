@@ -24,6 +24,15 @@ int main() {
     check(!owner.reserve(page + 1, alignment), "partial native page is rejected");
     check(!owner.reserve(length, page * 3), "non-power-of-two alignment is rejected");
     check(!owner.reserve(SIZE_MAX, alignment), "overflowing request is rejected");
+    check(owner.releasePrepared(), "empty startup cleanup is idempotent");
+    check(owner.prepare(length, alignment), "startup span exists before cleanup");
+    void* claimed = owner.reserve(length, alignment);
+    check(claimed && owner.releasePrepared() && owner.protect(claimed, length, PROT_READ | PROT_WRITE),
+          "startup cleanup preserves a claimed runtime span");
+    check(owner.release(claimed, length), "claimed runtime span remains releasable");
+    check(owner.prepare(length, alignment) && owner.releasePrepared(), "unused startup span is released");
+    check(owner.prepare(page, page), "cleanup permits different future requirements");
+    check(owner.releasePrepared() && owner.releasePrepared(), "repeated startup cleanup is safe");
     check(owner.prepare(length, alignment), "early exact aligned span is prepared");
     check(owner.prepare(length, alignment), "identical preparation is idempotent");
     check(!owner.prepare(page, alignment), "prepared ownership cannot be silently replaced");

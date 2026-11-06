@@ -1,0 +1,5 @@
+openssl_conf = openssl_init
+[openssl_init]
+alg_section = evp_properties
+[evp_properties]
+rh-allow-sha1-signatures = yes

@@ -560,6 +560,11 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     int applicationDepth = -1;   // depth of the open <application>, -1 when outside
     int activityDepth = -1;      // depth of the open <activity>/<activity-alias>
     std::vector<MetaDataEntry> currentActivityMeta;
+    int serviceDepth = -1;
+    int serviceFilterDepth = -1;
+    ServiceEntry currentService;
+    bool serviceExportedSet = false;
+    bool servicePermissionSet = false;
 
     // Meta-data attributes arrive in any order and android:value may be absent when
     // the manifest uses android:resource instead, so accumulate then commit.
@@ -657,11 +662,22 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     inIntentFilter = false;
                     currentActivityMeta.clear();
                     activityDepth = elementDepth;
+                } else if (tagName == "service" && elementDepth == applicationDepth + 1) {
+                    serviceDepth = elementDepth;
+                    currentService = ServiceEntry{};
+                    serviceExportedSet = servicePermissionSet = false;
                 } else if (tagName == "application") {
                     applicationDepth = elementDepth;
                 } else if (tagName == "intent-filter") {
-                    inIntentFilter = true;
-                    sawAnyIntentFilter = true;
+                    if (serviceDepth >= 0) {
+                        serviceFilterDepth = elementDepth;
+                        currentService.intentFilters.emplace_back();
+                    } else {
+                        inIntentFilter = true;
+                        sawAnyIntentFilter = true;
+                    }
+                } else if (tagName == "data" && serviceFilterDepth >= 0) {
+                    currentService.intentFilters.back().hasData = true;
                 } else if (tagName == "meta-data") {
                     metaName.clear();
                     metaValue.clear();
@@ -717,6 +733,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "versionName" && info.versionName.empty()) info.versionName = attrVal;
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
+                        if (attrName == "enabled") info.applicationEnabled = attrVal != "false" && attrVal != "0";
+                        if (attrName == "permission") info.applicationPermission = attrVal;
                         if (attrName == "theme") info.applicationTheme = attrVal;
                         if (attrName == "icon") info.appIcon = attrVal;
                         if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
@@ -726,6 +744,27 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "appComponentFactory" && info.appComponentFactory.empty() &&
                             !attrVal.empty()) {
                             info.appComponentFactory = attrVal;
+                        }
+                    } else if (tagName == "service" && serviceDepth >= 0) {
+                        if (attrName == "name") currentService.name = attrVal;
+                        if (attrName == "enabled") currentService.enabled = attrVal != "false" && attrVal != "0";
+                        if (attrName == "permission") {
+                            servicePermissionSet = true;
+                            currentService.permission = attrVal;
+                        }
+                        if (attrName == "exported") {
+                            serviceExportedSet = true;
+                            currentService.exported = attrVal == "true" || attrVal == "1";
+                        }
+                    } else if (tagName == "intent-filter" && serviceFilterDepth >= 0) {
+                        if (attrName == "priority") {
+                            if (attrType >= 0x10 && attrType <= 0x1f) {
+                                currentService.intentFilters.back().priority =
+                                    static_cast<int32_t>(read32(data, attrCur + 16));
+                            } else {
+                                try { currentService.intentFilters.back().priority = std::stoi(attrVal); }
+                                catch (...) {}
+                            }
                         }
                     } else if (tagName == "meta-data") {
                         if (attrName == "name") {
@@ -774,10 +813,14 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                             currentOrientation = parseOrientationString(attrVal);
                         }
                     } else if (tagName == "action") {
+                        if (serviceFilterDepth >= 0 && attrName == "name")
+                            currentService.intentFilters.back().actions.push_back(attrVal);
                         if (inIntentFilter && attrName == "name" && attrVal == kActionMain) {
                             sawActionMain = true;
                         }
                     } else if (tagName == "category") {
+                        if (serviceFilterDepth >= 0 && attrName == "name")
+                            currentService.intentFilters.back().categories.push_back(attrVal);
                         if (inIntentFilter && attrName == "name" && attrVal == kCategoryLauncher) {
                             sawCategoryLauncher = true;
                         }
@@ -813,7 +856,9 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                                            && metaResource != "@0x00000000";
                         entry.value = entry.isResource ? metaResource : metaValue;
                         entry.valueType = entry.isResource ? metaResourceType : metaValueType;
-                        if (activityDepth >= 0) {
+                        if (serviceDepth >= 0) {
+                            currentService.metaData.push_back(entry);
+                        } else if (activityDepth >= 0) {
                             bool dup = false;
                             for (const MetaDataEntry& m : currentActivityMeta) {
                                 if (m.name == entry.name) { dup = true; break; }
@@ -832,6 +877,12 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     sawMetaValue = false;
                 } else if (tagName == "intent-filter") {
                     inIntentFilter = false;
+                    serviceFilterDepth = -1;
+                } else if (tagName == "service" && serviceDepth >= 0) {
+                    if (!serviceExportedSet) currentService.exported = !currentService.intentFilters.empty();
+                    if (!servicePermissionSet) currentService.permission = info.applicationPermission;
+                    if (!currentService.name.empty()) info.services.push_back(currentService);
+                    serviceDepth = serviceFilterDepth = -1;
                 } else if (tagName == "activity" || tagName == "activity-alias") {
                     // </activity>: if intent-filter MAIN+LAUNCHER appears between
                     // Apparently this is the launcher activity.
@@ -878,6 +929,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     qualify(info.appClass);
     qualify(info.appComponentFactory);
     for (ActivityEntry& e : info.activities) qualify(e.name);
+    for (ServiceEntry& e : info.services) qualify(e.name);
 
     return info;
 }
@@ -1709,6 +1761,17 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     bool inIntentFilter = false;
     std::string currentExported;
     std::string currentTheme;
+    ServiceEntry currentService;
+    bool inService = false;
+    bool serviceInFilter = false;
+    bool servicePermissionSet = false;
+    bool serviceExportedSet = false;
+    auto commitService = [&]() {
+        if (!serviceExportedSet) currentService.exported = !currentService.intentFilters.empty();
+        if (!servicePermissionSet) currentService.permission = info.applicationPermission;
+        if (!currentService.name.empty()) info.services.push_back(currentService);
+        inService = serviceInFilter = false;
+    };
 
     auto commit = [&](const std::string& name) {
         if (info.mainActivity.empty() && !name.empty() && sawActionMain && sawCategoryLauncher) {
@@ -1753,7 +1816,21 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
             tagName = tag.substr(s, e - s);
         }
 
-        if (tagName == "activity" || tagName == "activity-alias") {
+        if (tagName == "service") {
+            if (!isClose) {
+                currentService = ServiceEntry{};
+                currentService.name = extractXmlAttr(tag, "name");
+                std::string enabled = extractXmlAttr(tag, "enabled");
+                currentService.enabled = enabled != "false" && enabled != "0";
+                std::string exported = extractXmlAttr(tag, "exported");
+                serviceExportedSet = !exported.empty();
+                currentService.exported = exported == "true" || exported == "1";
+                currentService.permission = extractXmlAttr(tag, "permission");
+                servicePermissionSet = tag.find("permission=") != std::string::npos;
+                inService = true;
+                if (isSelfClose) commitService();
+            } else if (inService) commitService();
+        } else if (tagName == "activity" || tagName == "activity-alias") {
             if (!isClose) {
                 currentActivity = extractXmlAttr(tag, "name");
                 aliasTarget = extractXmlAttr(tag, "targetActivity");
@@ -1785,10 +1862,33 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
                 inIntentFilter = false;
             }
         } else if (tagName == "intent-filter") {
-            inIntentFilter = !isClose;
-            if (!isClose) sawAnyIntentFilter = true;
+            if (inService) {
+                serviceInFilter = !isClose && !isSelfClose;
+                if (!isClose) {
+                    currentService.intentFilters.emplace_back();
+                    try { currentService.intentFilters.back().priority = std::stoi(extractXmlAttr(tag, "priority")); }
+                    catch (...) {}
+                }
+            } else {
+                inIntentFilter = !isClose && !isSelfClose;
+                if (!isClose) sawAnyIntentFilter = true;
+            }
+        } else if (tagName == "data" && serviceInFilter && !isClose) {
+            currentService.intentFilters.back().hasData = true;
+        } else if (tagName == "meta-data" && inService && !isClose) {
+            MetaDataEntry entry;
+            entry.name = extractXmlAttr(tag, "name");
+            entry.value = extractXmlAttr(tag, "value");
+            entry.valueType = 3;
+            std::string resource = extractXmlAttr(tag, "resource");
+            entry.isResource = !resource.empty();
+            if (entry.isResource) { entry.value = resource; entry.valueType = 1; }
+            if (!entry.name.empty()) currentService.metaData.push_back(entry);
         } else if (tagName == "application") {
             if (!isClose) {
+                std::string enabled = extractXmlAttr(tag, "enabled");
+                info.applicationEnabled = enabled != "false" && enabled != "0";
+                info.applicationPermission = extractXmlAttr(tag, "permission");
                 info.applicationTheme = extractXmlAttr(tag, "theme");
                 info.appLabel = extractXmlAttr(tag, "label");
                 info.appIcon = extractXmlAttr(tag, "icon");
@@ -1800,8 +1900,12 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
                 info.appComponentFactory = extractXmlAttr(tag, "appComponentFactory");
             }
         } else if (tagName == "action") {
+            if (serviceInFilter && !isClose)
+                currentService.intentFilters.back().actions.push_back(extractXmlAttr(tag, "name"));
             if (inIntentFilter && extractXmlAttr(tag, "name") == kActionMain) sawActionMain = true;
         } else if (tagName == "category") {
+            if (serviceInFilter && !isClose)
+                currentService.intentFilters.back().categories.push_back(extractXmlAttr(tag, "name"));
             if (inIntentFilter && extractXmlAttr(tag, "name") == kCategoryLauncher) sawCategoryLauncher = true;
         }
 
@@ -1820,6 +1924,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     qualify(info.appClass);
     qualify(info.appComponentFactory);
     for (ActivityEntry& e : info.activities) qualify(e.name);
+    for (ServiceEntry& e : info.services) qualify(e.name);
 
     return info;
 }

@@ -917,16 +917,11 @@ int guest_sigaltstack(const void* guest_ss, void* guest_oss) {
         host_ss.ss_flags = 0;
         if (gs->flags & kLinuxSsOnStack) host_ss.ss_flags |= SS_ONSTACK;
         if (gs->flags & kLinuxSsDisable) host_ss.ss_flags |= SS_DISABLE;
-#if defined(__APPLE__)
-        // Darwin requires at least MINSIGSTKSZ and rejects anything smaller. A guest
-        // sizing its stack for Linux may pass less; growing it is safe, because the
-        // guest only ever reads back the size it asked for.
-        if (!(host_ss.ss_flags & SS_DISABLE) && host_ss.ss_size < 32768) {
-            host_ss.ss_size = 32768;
-        }
-#endif
+        // The kernel must never use more space than the caller allocated.
     }
 
+    static thread_local bool guestInstalled = false;
+    const bool guestWasInstalled = guestInstalled;
     const int rc = ::sigaltstack(gs != nullptr ? &host_ss : nullptr,
                                  guest_oss != nullptr ? &host_oss : nullptr);
     if (rc != 0) {
@@ -937,7 +932,6 @@ int guest_sigaltstack(const void* guest_ss, void* guest_oss) {
 
     // The host arms its own alternate stack for crash handling; the guest must
     // never see it. Until the guest installs one, it has none (SS_DISABLE).
-    static thread_local bool guestInstalled = false;
     if (gs != nullptr) {
         guestInstalled = (gs->flags & kLinuxSsDisable) == 0;
     }
@@ -945,7 +939,7 @@ int guest_sigaltstack(const void* guest_ss, void* guest_oss) {
     if (guest_oss != nullptr) {
         GuestStack* gos = static_cast<GuestStack*>(guest_oss);
         std::memset(gos, 0, sizeof(*gos));
-        if (!guestInstalled) {
+        if (!guestWasInstalled) {
             gos->flags = kLinuxSsDisable;
         } else {
             gos->sp = host_oss.ss_sp;

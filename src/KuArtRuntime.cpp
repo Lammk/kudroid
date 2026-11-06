@@ -176,6 +176,7 @@ bool IsSystemOrSdkClass(const std::string& descriptor) {
 // Call a static method of android/app/ActivityThread.
 bool CallActivityThreadStatic(const char* name, const char* signature,
                               const DexValue* args, size_t num_args) {
+    kudroid::kuart::VmLockGuard guard;
     if (g_rt == nullptr || !g_rt->ready) return false;
     DexClass* at = g_rt->linker.FindClass("Landroid/app/ActivityThread;");
     if (at == nullptr) {
@@ -341,6 +342,7 @@ extern "C" int kuart_touch_drain_pending(void) {
 // Call a static method on any framework class, reporting an exception as an error.
 bool CallFrameworkStatic(const char* descriptor, const char* name, const char* signature,
                          const DexValue* args, size_t num_args) {
+    kudroid::kuart::VmLockGuard guard;
     if (g_rt == nullptr || !g_rt->ready) return false;
     DexClass* klass = g_rt->linker.FindClass(descriptor);
     if (klass == nullptr || klass->is_stub) {
@@ -727,9 +729,10 @@ extern "C" void kuart_register_component_meta_data_typed(const char* component_n
                         "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;[I)V", args, 4);
 }
 
-extern "C" void kuart_register_package(const char* package_name,
+extern "C" void kuart_register_package_with_state(const char* package_name,
                                        const char* const* activities,
-                                       int activity_count) {    if (g_rt == nullptr || !g_rt->ready) return;
+                                       int activity_count, int application_enabled) {
+    if (g_rt == nullptr || !g_rt->ready) return;
 
     DexArray* actArr = NewStringArray(activities, activity_count);
     if (actArr == nullptr) {
@@ -739,12 +742,48 @@ extern "C" void kuart_register_package(const char* package_name,
     DexObject* pkg = reinterpret_cast<DexObject*>(
         g_rt->linker.NewString(package_name != nullptr ? package_name : ""));
 
-    const DexValue args[2] = {
+    const DexValue args[3] = {
         DexValue::Ref(pkg),
         DexValue::Ref(reinterpret_cast<DexObject*>(actArr)),
+        DexValue::Int(application_enabled != 0),
     };
     CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerPackage",
-                        "(Ljava/lang/String;[Ljava/lang/String;)V", args, 2);
+                        "(Ljava/lang/String;[Ljava/lang/String;Z)V", args, 3);
+}
+
+extern "C" void kuart_register_package(const char* package_name, const char* const* activities,
+                                       int activity_count) {
+    kuart_register_package_with_state(package_name, activities, activity_count, 1);
+}
+
+extern "C" void kuart_register_service(const char* name, int enabled, int exported,
+                                      const char* permission) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    DexObject* service = reinterpret_cast<DexObject*>(g_rt->linker.NewString(name ? name : ""));
+    DexObject* required = reinterpret_cast<DexObject*>(g_rt->linker.NewString(permission ? permission : ""));
+    const DexValue args[4] = {DexValue::Ref(service), DexValue::Int(enabled != 0),
+                             DexValue::Int(exported != 0), DexValue::Ref(required)};
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerService",
+                        "(Ljava/lang/String;ZZLjava/lang/String;)V", args, 4);
+}
+
+extern "C" void kuart_register_service_intent_filter(const char* name, const char* const* actions,
+                                                    int action_count, const char* const* categories,
+                                                    int category_count, int priority, int has_data) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    DexArray* actionArray = NewStringArray(actions, action_count);
+    DexArray* categoryArray = NewStringArray(categories, category_count);
+    if (actionArray == nullptr || categoryArray == nullptr) {
+        SetError("kuart_register_service_intent_filter: array allocation failed");
+        return;
+    }
+    DexObject* service = reinterpret_cast<DexObject*>(g_rt->linker.NewString(name ? name : ""));
+    const DexValue args[5] = {DexValue::Ref(service),
+        DexValue::Ref(reinterpret_cast<DexObject*>(actionArray)),
+        DexValue::Ref(reinterpret_cast<DexObject*>(categoryArray)),
+        DexValue::Int(priority), DexValue::Int(has_data != 0)};
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerServiceIntentFilter",
+                        "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;IZ)V", args, 5);
 }
 
 extern "C" void kuart_register_theme(const char* component_name, unsigned int resource_id) {

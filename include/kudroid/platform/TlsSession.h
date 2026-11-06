@@ -23,6 +23,7 @@ struct TlsOptions {
     std::string hostname;             // server name indication; empty for none
     std::vector<std::string> alpn;    // offered application protocols
     int minVersion = 0;               // 0 default; 12 = TLS 1.2, 13 = TLS 1.3
+    int sessionTickets = -1;          // -1 host default; 0 disabled; 1 enabled
 };
 
 // Failure codes beyond errno values.

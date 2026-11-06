@@ -240,6 +240,12 @@ TlsSession* TlsCreate(int fd, const TlsOptions& options) {
     SSLSetProtocolVersionMin(s->ctx, kTLSProtocol12);
     // Stop at the server's certificate so SecureTransport does not judge it; the caller does.
     SSLSetSessionOption(s->ctx, kSSLSessionOptionBreakOnServerAuth, true);
+    if (options.sessionTickets >= 0 &&
+        SSLSetSessionTicketsEnabled(s->ctx, options.sessionTickets != 0) != noErr) {
+        CFRelease(s->ctx);
+        delete s;
+        return nullptr;
+    }
     if (!options.hostname.empty()) {
         SSLSetPeerDomainName(s->ctx, options.hostname.c_str(), options.hostname.size());
     }

@@ -279,6 +279,7 @@ struct KuDroidApp: App {
         kudroid_log_vm_startup_probe()
         IOSDiagnostics.shared.start()
         IOSDiagnostics.shared.applicationPhase("app-init")
+        kudroid_gpu_prepare_egl()
         activateAudioSession()
         KuDroidNetworkMonitor.shared.start()
         KuDroidThermalMonitor.shared.start()

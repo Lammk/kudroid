@@ -1,0 +1,17 @@
+diff --git a/src/libANGLE/renderer/vulkan/vk_renderer.cpp b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+--- a/src/libANGLE/renderer/vulkan/vk_renderer.cpp
++++ b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+@@ -4747,6 +4747,13 @@
+         mEnabledDeviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+     }
+ 
++    // Portability devices require this extension whenever it is advertised.
++    constexpr const char *kPortabilitySubset = "VK_KHR_portability_subset";
++    if (ExtensionFound(kPortabilitySubset, deviceExtensionNames))
++    {
++        mEnabledDeviceExtensions.push_back(kPortabilitySubset);
++    }
++
+     // Query extensions and their features.
+     queryDeviceExtensionFeatures(deviceExtensionNames);
+ 

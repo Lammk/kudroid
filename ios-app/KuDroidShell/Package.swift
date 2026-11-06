@@ -3,6 +3,8 @@ import PackageDescription
 import Foundation
 
 let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let angleFrameworkDir = ProcessInfo.processInfo.environment["KUDROID_ANGLE_FRAMEWORK_DIR"]
+    ?? "../../third_party/ANGLE/lib"
 
 let package = Package(
     name: "KuDroidShell",
@@ -76,11 +78,11 @@ let package = Package(
         ),
         .binaryTarget(
             name: "libEGL",
-            path: "../../third_party/ANGLE/lib/libEGL.xcframework"
+            path: "\(angleFrameworkDir)/libEGL.xcframework"
         ),
         .binaryTarget(
             name: "libGLESv2",
-            path: "../../third_party/ANGLE/lib/libGLESv2.xcframework"
+            path: "\(angleFrameworkDir)/libGLESv2.xcframework"
         ),
     ],
     swiftLanguageModes: [.v5]

@@ -1,0 +1,15 @@
+diff --git a/src/common/vulkan/BUILD.gn b/src/common/vulkan/BUILD.gn
+index aaf43796a..d2ca1d6aa 100644
+--- a/src/common/vulkan/BUILD.gn
++++ b/src/common/vulkan/BUILD.gn
+@@ -125,7 +125,9 @@ if (angle_enable_vulkan) {
+       }
+     } else if (!is_android) {
+       if (angle_shared_libvulkan) {
+-        data_deps = [ "$angle_vulkan_loader_dir:libvulkan" ]
++        if (angle_use_custom_libvulkan) {
++          data_deps = [ "$angle_vulkan_loader_dir:libvulkan" ]
++        }
+       } else {
+         deps = [ "$angle_vulkan_loader_dir:libvulkan" ]
+       }

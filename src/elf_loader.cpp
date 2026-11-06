@@ -1024,7 +1024,8 @@ bool ElfLoader::map() {
     return true;
 }
 
-bool ElfLoader::relocate(const std::function<bool()>& finalizer) {
+bool ElfLoader::relocate(const std::function<bool()>& finalizer,
+                        const std::function<bool()>& initializer) {
     if (!parsed_) {
         lastError_ = "Must call parse() before relocate()";
         return false;
@@ -1402,6 +1403,13 @@ bool ElfLoader::relocate(const std::function<bool()>& finalizer) {
     if (ok) {
         ok = applyProtections();
         if (!ok) lastError_ = "Failed to apply ELF segment protections";
+    }
+    if (ok && initializer) {
+#if defined(__APPLE__) && TARGET_OS_OSX
+        pthread_jit_write_protect_np(1);
+#endif
+        ok = initializer();
+        if (!ok) lastError_ = "ELF runtime configuration failed";
     }
 
     return ok;

@@ -2,6 +2,7 @@ package android.view;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 
 /** A lightweight SurfaceView whose holder follows the laid out host surface. */
@@ -70,6 +71,7 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         boolean created;
         int width;
         int height;
+        int format;
 
         CallbackState(SurfaceHolder.Callback callback) {
             this.callback = callback;
@@ -84,6 +86,7 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         private volatile boolean mCreated;
         private volatile int mWidth;
         private volatile int mHeight;
+        private volatile int mFormat = PixelFormat.RGBA_8888;
 
         SimpleSurfaceHolder(SurfaceView view) {
             mView = view;
@@ -136,18 +139,22 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
             boolean changed;
             final int width;
             final int height;
+            final int format;
             synchronized (mCallbacks) {
                 if (!mCreated || !mCallbacks.contains(state)) return;
                 created = !state.created;
-                changed = created || state.width != mWidth || state.height != mHeight;
+                changed = created || state.width != mWidth || state.height != mHeight
+                        || state.format != mFormat;
                 state.created = true;
                 state.width = mWidth;
                 state.height = mHeight;
                 width = mWidth;
                 height = mHeight;
+                state.format = mFormat;
+                format = mFormat;
             }
             if (created) invokeCreated(state.callback);
-            if (changed) invokeChanged(state.callback, width, height);
+            if (changed) invokeChanged(state.callback, format, width, height);
             if (changed && state.callback instanceof SurfaceHolder.Callback2) {
                 invokeRedraw((SurfaceHolder.Callback2) state.callback);
             }
@@ -186,8 +193,8 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
             catch (Throwable t) { android.util.Log.e("SurfaceHolder", "surfaceCreated failed: " + t); }
         }
 
-        private void invokeChanged(SurfaceHolder.Callback callback, int width, int height) {
-            try { callback.surfaceChanged(this, 0, width, height); }
+        private void invokeChanged(SurfaceHolder.Callback callback, int format, int width, int height) {
+            try { callback.surfaceChanged(this, format, width, height); }
             catch (Throwable t) { android.util.Log.e("SurfaceHolder", "surfaceChanged failed: " + t); }
         }
 
@@ -212,7 +219,14 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         @Override public void setType(int type) {}
         @Override public void setFixedSize(int width, int height) {}
         @Override public void setSizeFromLayout() {}
-        @Override public void setFormat(int format) {}
+        @Override public void setFormat(int format) {
+            if (format == PixelFormat.OPAQUE) format = PixelFormat.RGB_565;
+            synchronized (mCallbacks) {
+                if (mFormat == format) return;
+                mFormat = format;
+            }
+            mView.requestLayout();
+        }
         @Override public void setKeepScreenOn(boolean screenOn) {}
         @Override public Canvas lockCanvas() { return mSurface.lockCanvas(); }
         @Override public Canvas lockCanvas(Rect dirty) { return mSurface.lockCanvas(dirty); }

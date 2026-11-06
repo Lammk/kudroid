@@ -22,12 +22,14 @@ DexHeap::~DexHeap() {
 }
 
 void* DexHeap::Allocate(size_t bytes) {
-    if (bytes == 0) return nullptr;
+    if (bytes == 0 || bytes > SIZE_MAX - (kAlignment - 1)) return nullptr;
     const size_t need = RoundUpToAlignment(bytes);
+    // Class loading and object allocation use distinct entry locks.
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!blocks_.empty()) {
         Block& tail = blocks_.back();
-        if (tail.used + need <= tail.capacity) {
+        if (need <= tail.capacity - tail.used) {
             void* p = tail.memory + tail.used;
             tail.used += need;
             bytes_allocated_ += need;

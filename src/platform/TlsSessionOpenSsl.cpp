@@ -201,6 +201,8 @@ TlsSession* TlsCreate(int fd, const TlsOptions& options) {
     SSL_CTX_set_verify(s->ctx, SSL_VERIFY_NONE, nullptr);
     SSL_CTX_set_mode(s->ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     SSL_CTX_set_min_proto_version(s->ctx, options.minVersion >= 13 ? TLS1_3_VERSION : TLS1_2_VERSION);
+    if (options.sessionTickets == 0) SSL_CTX_set_options(s->ctx, SSL_OP_NO_TICKET);
+    if (options.sessionTickets == 1) SSL_CTX_clear_options(s->ctx, SSL_OP_NO_TICKET);
     if (!options.alpn.empty()) {
         std::vector<uint8_t> wire;
         for (const std::string& p : options.alpn) {

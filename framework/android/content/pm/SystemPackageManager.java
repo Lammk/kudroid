@@ -45,9 +45,63 @@ public class SystemPackageManager extends PackageManager {
 
     /** The running package, so a query naming it can be answered. */
     private static String sPackageName = "";
+    private static boolean sApplicationEnabled = true;
 
     /** Every activity the manifest declared, in launch order. */
     private static final List<String> sActivities = new ArrayList<String>();
+
+    private static final Map<String, ServiceInfo> sServices = new HashMap<String, ServiceInfo>();
+    private static final Map<String, List<ServiceFilter>> sServiceFilters =
+            new HashMap<String, List<ServiceFilter>>();
+    private static final Map<String, Integer> sComponentStates = new HashMap<String, Integer>();
+
+    @Override
+    public void setComponentEnabledSetting(ComponentName component, int state, int flags) {
+        if (component == null) return;
+        synchronized (SystemPackageManager.class) {
+            sComponentStates.put(component.flattenToString(), state);
+        }
+    }
+
+    @Override
+    public int getComponentEnabledSetting(ComponentName component) {
+        if (component == null) return COMPONENT_ENABLED_STATE_DEFAULT;
+        synchronized (SystemPackageManager.class) {
+            Integer state = sComponentStates.get(component.flattenToString());
+            return state == null ? COMPONENT_ENABLED_STATE_DEFAULT : state;
+        }
+    }
+
+    private static final class ServiceFilter {
+        final android.content.IntentFilter filter = new android.content.IntentFilter();
+        int priority;
+        boolean hasData;
+    }
+
+    public static synchronized void registerService(String name, boolean enabled,
+            boolean exported, String permission) {
+        if (name == null || name.isEmpty()) throw new IllegalArgumentException("Empty service name");
+        ServiceInfo info = new ServiceInfo();
+        info.name = name;
+        info.packageName = sPackageName;
+        info.enabled = enabled;
+        info.exported = exported;
+        info.permission = permission == null || permission.isEmpty() ? null : permission;
+        sServices.put(name, info);
+        sServiceFilters.put(name, new ArrayList<ServiceFilter>());
+    }
+
+    public static synchronized void registerServiceIntentFilter(String name, String[] actions,
+            String[] categories, int priority, boolean hasData) {
+        List<ServiceFilter> filters = sServiceFilters.get(name);
+        if (filters == null) throw new IllegalArgumentException("Unknown service: " + name);
+        ServiceFilter entry = new ServiceFilter();
+        if (actions != null) for (String action : actions) entry.filter.addAction(action);
+        if (categories != null) for (String category : categories) entry.filter.addCategory(category);
+        entry.priority = priority;
+        entry.hasData = hasData;
+        filters.add(entry);
+    }
 
     /**
      * Register one component's meta-data. Called from the native launcher, once per
@@ -194,8 +248,17 @@ public class SystemPackageManager extends PackageManager {
 
     /** Register the package name and activity list the manifest declared. */
     public static synchronized void registerPackage(String packageName, String[] activities) {
+        registerPackage(packageName, activities, true);
+    }
+
+    public static synchronized void registerPackage(String packageName, String[] activities,
+            boolean enabled) {
         if (packageName != null) sPackageName = packageName;
+        sApplicationEnabled = enabled;
         sActivities.clear();
+        sServices.clear();
+        sServiceFilters.clear();
+        sComponentStates.clear();
         sApplicationTheme = 0;
         sActivityThemes.clear();
         if (activities != null) {
@@ -308,6 +371,7 @@ public class SystemPackageManager extends PackageManager {
         ApplicationInfo ai = new ApplicationInfo();
         ai.packageName = packageName;
         ai.processName = packageName;
+        ai.enabled = !sPackageName.equals(packageName) || sApplicationEnabled;
         ai.dataDir = "/data/data/" + packageName;
         ai.sourceDir = "/data/app/" + packageName + "/base.apk";
         ai.publicSourceDir = "/data/app/" + packageName + "/base.apk";
@@ -360,12 +424,83 @@ public class SystemPackageManager extends PackageManager {
     public ServiceInfo getServiceInfo(ComponentName component, int flags)
             throws NameNotFoundException {
         if (component == null) throw new NameNotFoundException("null component");
-        ServiceInfo si = new ServiceInfo();
-        si.name = component.getClassName();
-        si.packageName = component.getPackageName() != null
-                ? component.getPackageName() : sPackageName;
-        si.metaData = metaDataFor(si.name);
-        return si;
+        synchronized (SystemPackageManager.class) {
+            ServiceInfo declared = sServices.get(component.getClassName());
+            if (declared == null || !declared.packageName.equals(component.getPackageName()))
+                throw new NameNotFoundException(component.flattenToString());
+            ServiceInfo info = new ServiceInfo();
+            info.name = declared.name;
+            info.packageName = declared.packageName;
+            info.enabled = declared.enabled;
+            info.exported = declared.exported;
+            info.permission = declared.permission;
+            info.applicationInfo = getApplicationInfo(info.packageName, flags);
+            info.processName = info.packageName;
+            if ((flags & GET_META_DATA) != 0) info.metaData = metaDataFor(info.name);
+            return info;
+        }
+    }
+
+    private boolean serviceEnabled(ServiceInfo info) {
+        if (!sApplicationEnabled) return false;
+        int state = getComponentEnabledSetting(new ComponentName(info.packageName, info.name));
+        return state == COMPONENT_ENABLED_STATE_ENABLED
+                || (state == COMPONENT_ENABLED_STATE_DEFAULT && info.enabled);
+    }
+
+    @Override
+    public List<ResolveInfo> queryIntentServices(Intent intent, int flags) {
+        if (intent == null) throw new NullPointerException("intent == null");
+        List<ResolveInfo> result = new ArrayList<ResolveInfo>();
+        synchronized (SystemPackageManager.class) {
+            ComponentName component = intent.getComponent();
+            if (component != null) {
+                try {
+                    ServiceInfo info = getServiceInfo(component, flags);
+                    if (serviceEnabled(info)) {
+                        ResolveInfo resolved = new ResolveInfo();
+                        resolved.serviceInfo = info;
+                        result.add(resolved);
+                    }
+                } catch (NameNotFoundException ignored) {}
+                return result;
+            }
+            if (intent.getPackage() != null && !sPackageName.equals(intent.getPackage())) return result;
+            for (ServiceInfo declared : sServices.values()) {
+                if (!serviceEnabled(declared)) continue;
+                ServiceFilter best = null;
+                for (ServiceFilter entry : sServiceFilters.get(declared.name)) {
+                    // Data filters require URI and MIME matching before they can resolve.
+                    if (entry.hasData || intent.getData() != null || intent.getType() != null) continue;
+                    if (entry.filter.countActions() == 0 || (intent.getAction() != null
+                            && !entry.filter.hasAction(intent.getAction()))) continue;
+                    boolean matches = true;
+                    java.util.Set<String> categories = intent.getCategories();
+                    if (categories != null) for (String category : categories) {
+                        if (!entry.filter.hasCategory(category)) { matches = false; break; }
+                    }
+                    if ((flags & MATCH_DEFAULT_ONLY) != 0
+                            && !entry.filter.hasCategory("android.intent.category.DEFAULT")) matches = false;
+                    if (matches && (best == null || entry.priority > best.priority)) best = entry;
+                }
+                if (best == null) continue;
+                ResolveInfo resolved = new ResolveInfo();
+                try {
+                    resolved.serviceInfo = getServiceInfo(
+                            new ComponentName(declared.packageName, declared.name), flags);
+                } catch (NameNotFoundException ignored) { continue; }
+                resolved.priority = best.priority;
+                resolved.isDefault = best.filter.hasCategory("android.intent.category.DEFAULT");
+                result.add(resolved);
+            }
+        }
+        Collections.sort(result, new java.util.Comparator<ResolveInfo>() {
+            public int compare(ResolveInfo a, ResolveInfo b) {
+                if (a.priority != b.priority) return a.priority > b.priority ? -1 : 1;
+                return a.serviceInfo.name.compareTo(b.serviceInfo.name);
+            }
+        });
+        return result;
     }
 
     @Override

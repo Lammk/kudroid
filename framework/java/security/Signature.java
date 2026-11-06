@@ -16,7 +16,7 @@ public abstract class Signature {
     }
 
     private static String canonical(String algorithm) {
-        String[] supported = {"SHA224withRSA", "SHA256withRSA", "SHA384withRSA", "SHA512withRSA"};
+        String[] supported = {"SHA1withRSA", "SHA224withRSA", "SHA256withRSA", "SHA384withRSA", "SHA512withRSA"};
         for (String name : supported) if (name.equalsIgnoreCase(algorithm)) return name;
         return null;
     }

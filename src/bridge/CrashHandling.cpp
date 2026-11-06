@@ -48,6 +48,7 @@ extern void NSSetUncaughtExceptionHandler(void (*handler)(void* exception));
 extern "C" bool bionic_handle_guest_syscall_trap(void* context);
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 #include "kudroid/abi/GuestSignals.h"  // guest_signal_dispatch / has_handler
+#include "kudroid/kuart/MethodResolutionTrace.h"
 
 // ── JNI_OnLoad abort() Shield ────────────────────────────────────────────────
 // Secondary libraries (conscrypt, HttpClient, maesdk, etc.) may call abort()
@@ -1362,23 +1363,26 @@ static void log_fault_context(const void* ucontext, const void* faultAddr) {
     for (int i = 0; i < 29; ++i) {
         const uint64_t p = ss.__x[i];
         if (p < 0x100000000ULL || (p & 7) != 0) continue;
-        uint64_t w[12];
-        vm_size_t got = 0;
-        if (vm_read_overwrite(mach_task_self(), p + 64, sizeof(w),
-                              reinterpret_cast<vm_address_t>(w), &got) != KERN_SUCCESS ||
-            got != sizeof(w)) {
-            continue;
+        for (unsigned offset : {0u, 64u}) {
+            if (p > UINT64_MAX - offset) continue;
+            uint64_t w[12];
+            vm_size_t got = 0;
+            if (vm_read_overwrite(mach_task_self(), p + offset, sizeof(w),
+                                  reinterpret_cast<vm_address_t>(w), &got) != KERN_SUCCESS ||
+                got != sizeof(w)) {
+                continue;
+            }
+            std::snprintf(line, sizeof(line),
+                          "fault-peek x%d+%u: %016llx %016llx %016llx %016llx %016llx %016llx "
+                          "%016llx %016llx %016llx %016llx %016llx %016llx",
+                          i, offset, static_cast<unsigned long long>(w[0]), static_cast<unsigned long long>(w[1]),
+                          static_cast<unsigned long long>(w[2]), static_cast<unsigned long long>(w[3]),
+                          static_cast<unsigned long long>(w[4]), static_cast<unsigned long long>(w[5]),
+                          static_cast<unsigned long long>(w[6]), static_cast<unsigned long long>(w[7]),
+                          static_cast<unsigned long long>(w[8]), static_cast<unsigned long long>(w[9]),
+                          static_cast<unsigned long long>(w[10]), static_cast<unsigned long long>(w[11]));
+            signal_safe_log("KuDroidTrap", line);
         }
-        std::snprintf(line, sizeof(line),
-                      "fault-peek x%d+64: %016llx %016llx %016llx %016llx %016llx %016llx "
-                      "%016llx %016llx %016llx %016llx %016llx %016llx",
-                      i, static_cast<unsigned long long>(w[0]), static_cast<unsigned long long>(w[1]),
-                      static_cast<unsigned long long>(w[2]), static_cast<unsigned long long>(w[3]),
-                      static_cast<unsigned long long>(w[4]), static_cast<unsigned long long>(w[5]),
-                      static_cast<unsigned long long>(w[6]), static_cast<unsigned long long>(w[7]),
-                      static_cast<unsigned long long>(w[8]), static_cast<unsigned long long>(w[9]),
-                      static_cast<unsigned long long>(w[10]), static_cast<unsigned long long>(w[11]));
-        signal_safe_log("KuDroidTrap", line);
     }
 }
 #endif
@@ -2482,6 +2486,7 @@ host_fatal_path:;
             }
 #endif
 
+            kudroid::kuart::WriteMethodResolutionTrace(fd, (uintptr_t)pthread_self());
             (void)!write(fd, "\n--- backtrace ---\n", 19);
             writeBacktrace(fd);
 

@@ -1,6 +1,7 @@
 #include "kudroid/RuntimeCageAdapter.h"
 #include "kudroid/RuntimeCageApi.h"
 #include "kudroid/AlignedVmReservations.h"
+#include "kudroid/ExecMemory.h"
 #include "kudroid/FlutterRuntime.h"
 #include "kudroid/elf_loader.hpp"
 #include "../third_party/picojson/picojson.h"
@@ -126,7 +127,13 @@ int release(void* context, void* address, uint64_t length) {
     return static_cast<Installation*>(context)->reservations->release(address, length);
 }
 int protect(void* context, void* address, uint64_t length, int permissions) {
-    return static_cast<Installation*>(context)->reservations->protect(address, length, permissions);
+    auto& owner = *static_cast<Installation*>(context)->reservations;
+    const bool protectedPages = owner.protect(address, length, permissions);
+    if (!protectedPages) {
+        std::fprintf(stderr, "[KuDroidCage] protect failed address=%p length=%llu permissions=0x%x native-page=%zu\n",
+            address, static_cast<unsigned long long>(length), permissions, owner.pageSize());
+    }
+    return protectedPages;
 }
 int discard(void* context, void* address, uint64_t length) {
     return static_cast<Installation*>(context)->reservations->discard(address, length);
@@ -154,6 +161,19 @@ void logEarlyRuntimeCageReservations() {
         static_cast<unsigned long long>(pool.asset.length),
         static_cast<unsigned long long>(pool.asset.alignment), pool.prepared);
 #endif
+}
+
+void releaseUnusedRuntimeCageReservations() {
+    auto& pool = earlyPool();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    if (!pool.reservations) return;
+    if (!pool.reservations->releasePrepared()) {
+        std::fprintf(stderr, "[KuDroidCage] unused reservation release failed\n");
+        return;
+    }
+    pool.reservations.reset();
+    pool.prepared = false;
+    std::fprintf(stderr, "[KuDroidCage] unused startup reservation released\n");
 }
 
 bool installRuntimeCageAdapter(LibraryManager& manager, ElfLoader& runtime) {
@@ -214,6 +234,32 @@ bool installRuntimeCageAdapter(LibraryManager& manager, ElfLoader& runtime) {
     std::fprintf(stderr, "[KuDroidCage] source-adapter=9.4.146.24 early-length=%llu alignment=%llu prepared=%d page=%zu\n",
         static_cast<unsigned long long>(length), static_cast<unsigned long long>(alignment),
         prepared, owner->reservations->pageSize());
+    return true;
+#endif
+}
+
+bool configureRuntimeCageExecution(ElfLoader& runtime) {
+#if !defined(__APPLE__) || (!defined(__arm64__) && !defined(__aarch64__))
+    (void)runtime;
+    return true;
+#else
+    if (ExecMemory::Mode() != ExecMemMode::kPrepared ||
+        ExecMemory::GuestReservationsAvailable()) return true;
+    void* version = runtime.getSymbolAddress(kVersion);
+    if (!version || !runtime.getSymbolAddress(kInit) ||
+        !runtime.getSymbolAddress(kSharedCage)) return true;
+    const char* reported = reinterpret_cast<const char* (*)()>(version)();
+    if (!reported || std::strcmp(reported, "9.4.146.24")) return true;
+    auto setFlags = reinterpret_cast<void (*)(const char*, size_t)>(
+        runtime.getSymbolAddress("_ZN2v82V818SetFlagsFromStringEPKcm"));
+    const auto* jitless = static_cast<const bool*>(
+        runtime.getSymbolAddress("_ZN2v88internal12FLAG_jitlessE"));
+    if (!setFlags || !jitless) return false;
+    // Flag metadata requires finalized writable segment permissions.
+    constexpr char flags[] = "--jitless";
+    setFlags(flags, sizeof(flags) - 1);
+    if (!*jitless) return false;
+    std::fprintf(stderr, "[KuDroidCage] execution=interpreter guest-reservations=0\n");
     return true;
 #endif
 }

@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <new>
 #include <vector>
 
 namespace kudroid {
@@ -30,8 +32,14 @@ public:
     // Descriptor/name strings are copied into the heap for stable pointers.
     const char* InternString(const char* s);
 
-    size_t BytesAllocated() const { return bytes_allocated_; }
-    size_t BlockCount() const { return blocks_.size(); }
+    size_t BytesAllocated() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return bytes_allocated_;
+    }
+    size_t BlockCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return blocks_.size();
+    }
 
 private:
     static constexpr size_t kBlockSize = 1 << 20;  // 1MB
@@ -43,6 +51,7 @@ private:
     };
 
     std::vector<Block> blocks_;
+    mutable std::mutex mutex_;
     size_t bytes_allocated_ = 0;
 };
 

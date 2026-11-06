@@ -15,6 +15,7 @@ public class NativeActivity extends Activity implements SurfaceHolder.Callback2,
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        getWindow().takeSurface(this);
         super.onCreate(savedInstanceState);
     }
 

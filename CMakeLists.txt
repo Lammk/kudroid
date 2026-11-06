@@ -4,6 +4,7 @@ project(KuDroid LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+option(KUDROID_BUILD_HOST_TESTS "Build the host regression suites" ON)
 
 # Default to Release if not specified
 if(NOT CMAKE_BUILD_TYPE)
@@ -149,6 +150,7 @@ add_library(kudroid_core STATIC
     src/platform/MediaDecoder.cpp
     src/platform/GraphicsShim.cpp
     src/platform/EglCapabilities.cpp
+    src/platform/GlesBackendProbe.cpp
     # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp
     # because it owns a thread and a set of pipes, and nothing else in there does.
     src/platform/FramePacer.cpp
@@ -184,6 +186,7 @@ add_library(kudroid_core STATIC
     src/kuart/DexClassLinker.cpp
     src/kuart/DexFrame.cpp
     src/kuart/Interpreter.cpp
+    src/kuart/MethodResolutionTrace.cpp
     src/kuart/DexJniEnv.cpp
     src/kuart/DexJniFunctions.cpp
     src/kuart/jni_trampoline.S
@@ -268,6 +271,19 @@ target_include_directories(kudroid_core PUBLIC
 )
 target_include_directories(kudroid_core SYSTEM PRIVATE third_party/android_headers)
 target_include_directories(kudroid_core PRIVATE third_party/ANGLE/include)
+set_property(SOURCE src/platform/GlesBackendProbe.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/MoltenVK/MoltenVK/include")
+
+set(KUDROID_GLES_BACKEND "metal" CACHE STRING "Default GLES backend: metal or vulkan")
+set_property(CACHE KUDROID_GLES_BACKEND PROPERTY STRINGS metal vulkan)
+if(KUDROID_GLES_BACKEND STREQUAL "vulkan")
+    set_property(TARGET kudroid_core PROPERTY KUDROID_GLES_USE_VULKAN TRUE)
+    set_property(SOURCE src/platform/EglCapabilities.cpp src/platform/GraphicsShim.cpp
+        src/bridge/ShellUI.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        "$<$<BOOL:$<TARGET_PROPERTY:KUDROID_GLES_USE_VULKAN>>:KUDROID_GLES_USE_VULKAN=1>")
+elseif(NOT KUDROID_GLES_BACKEND STREQUAL "metal")
+    message(FATAL_ERROR "KUDROID_GLES_BACKEND must be metal or vulkan")
+endif()
 
 # kudroid_core uses Apple frameworks (AudioQueue -> AudioToolbox,
 # kCFRunLoopCommonModes -> CoreFoundation, NSException/objc runtime ->
@@ -398,7 +414,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 
     # Note: Copying of MoltenVK and ANGLE frameworks into KuDroidShell.app/Frameworks 
     # will be handled by build.yml script after xcodebuild.
-else()
+elseif(KUDROID_BUILD_HOST_TESTS)
     # ─────────────────────────────────────────────────────────────────────────
     # Host-side tests (not built for iOS)
     # ─────────────────────────────────────────────────────────────────────────
@@ -410,10 +426,6 @@ else()
     target_include_directories(test_aligned_vm_reservations PRIVATE include)
     target_link_libraries(test_aligned_vm_reservations PRIVATE pthread)
     target_include_directories(test_elf_alias_store PRIVATE include)
-    add_executable(test_egl_capabilities tests/test_egl_capabilities.cpp)
-    target_include_directories(test_egl_capabilities PRIVATE third_party/ANGLE/include)
-    target_link_libraries(test_egl_capabilities PRIVATE kudroid_core)
-    target_link_options(test_egl_capabilities PRIVATE -rdynamic)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_elf_relocations.cpp")
         add_executable(test_elf_relocations tests/test_elf_relocations.cpp)
         target_link_libraries(test_elf_relocations PRIVATE kudroid_core)
@@ -1030,4 +1042,71 @@ else()
         target_link_libraries(kuart_resource_compat PRIVATE kudroid_core art_dex ZLIB::ZLIB)
         target_include_directories(kuart_resource_compat PRIVATE include)
     endif()
+endif()
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    find_package(Threads REQUIRED)
+    add_executable(test_egl_capabilities tests/test_egl_capabilities.cpp)
+    target_include_directories(test_egl_capabilities PRIVATE third_party/ANGLE/include)
+    target_link_libraries(test_egl_capabilities PRIVATE kudroid_core)
+    target_link_options(test_egl_capabilities PRIVATE -rdynamic)
+    enable_testing()
+    foreach(backend metal vulkan)
+        add_executable(test_egl_backend_${backend} tests/test_egl_backend.cpp src/platform/EglCapabilities.cpp)
+        target_include_directories(test_egl_backend_${backend} PRIVATE include third_party/ANGLE/include)
+        target_link_libraries(test_egl_backend_${backend} PRIVATE Threads::Threads)
+        if(backend STREQUAL "vulkan")
+            target_compile_definitions(test_egl_backend_${backend} PRIVATE KUDROID_GLES_USE_VULKAN=1)
+        endif()
+        add_test(NAME egl_backend_${backend} COMMAND test_egl_backend_${backend} ${backend})
+        set_tests_properties(egl_backend_${backend} PROPERTIES TIMEOUT 20)
+    endforeach()
+    add_executable(test_method_resolution_trace
+        tests/test_method_resolution_trace.cpp src/kuart/MethodResolutionTrace.cpp)
+    target_include_directories(test_method_resolution_trace PRIVATE include)
+    if(NOT KUDROID_BUILD_HOST_TESTS)
+        foreach(startup_test IN ITEMS test_aligned_vm_reservations test_mmap_reservation
+                                      test_elf_relocations test_elf_alias_store)
+            add_executable(${startup_test} tests/${startup_test}.cpp)
+            target_link_libraries(${startup_test} PRIVATE kudroid_core art_dex Threads::Threads)
+            target_include_directories(${startup_test} PRIVATE include)
+        endforeach()
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(test_gles_backend_probe tests/test_gles_backend_probe.cpp src/platform/GlesBackendProbe.cpp)
+        target_include_directories(test_gles_backend_probe PRIVATE include third_party/ANGLE/include)
+        target_include_directories(test_gles_backend_probe SYSTEM PRIVATE third_party/MoltenVK/MoltenVK/include)
+        target_link_libraries(test_gles_backend_probe PRIVATE ${CMAKE_DL_LIBS})
+        add_executable(test_startup_vm_pressure tests/test_startup_vm_pressure.cpp src/AlignedVmReservations.cpp)
+        target_include_directories(test_startup_vm_pressure PRIVATE include)
+        target_link_libraries(test_startup_vm_pressure PRIVATE Threads::Threads)
+        add_executable(test_surface_lifecycle tests/test_surface_lifecycle.cpp)
+        target_link_libraries(test_surface_lifecycle PRIVATE kudroid_core art_dex)
+        target_include_directories(test_surface_lifecycle PRIVATE include)
+        add_executable(test_framework_startup kuart-tests/test_kuart_security_collections.cpp)
+        target_link_libraries(test_framework_startup PRIVATE kudroid_core art_dex)
+        target_include_directories(test_framework_startup PRIVATE include)
+        target_compile_definitions(test_framework_startup PRIVATE KUART_SECURITY_COLLECTIONS_DEX="")
+        add_executable(test_manifest_services tests/test_manifest_services.cpp)
+        target_link_libraries(test_manifest_services PRIVATE kudroid_core)
+        target_include_directories(test_manifest_services PRIVATE include)
+    endif()
+    add_executable(benchmark_elf_map tools/benchmark_elf_map.cpp)
+    target_link_libraries(benchmark_elf_map PRIVATE kudroid_core)
+    target_include_directories(benchmark_elf_map PRIVATE include)
+    add_executable(test_android_tts tests/test_android_tts.cpp)
+    target_link_libraries(test_android_tts PRIVATE kudroid_core art_dex)
+    target_include_directories(test_android_tts PRIVATE include)
+    add_executable(test_dex_assignability tests/test_dex_assignability.cpp)
+    target_link_libraries(test_dex_assignability PRIVATE kudroid_core art_dex)
+    target_include_directories(test_dex_assignability PRIVATE include)
+    add_executable(test_interpreter_entry_lock tests/test_interpreter_entry_lock.cpp)
+    target_link_libraries(test_interpreter_entry_lock PRIVATE kudroid_core art_dex)
+    target_include_directories(test_interpreter_entry_lock PRIVATE include)
+    add_executable(test_dex_heap_concurrent tests/test_dex_heap_concurrent.cpp src/kuart/DexHeap.cpp)
+    target_include_directories(test_dex_heap_concurrent PRIVATE include)
+    target_link_libraries(test_dex_heap_concurrent PRIVATE Threads::Threads)
+    add_executable(test_kuart_android_tls kuart-tests/test_kuart_android_tls.cpp)
+    target_link_libraries(test_kuart_android_tls PRIVATE kudroid_core art_dex)
+    target_include_directories(test_kuart_android_tls PRIVATE include)
 endif()

@@ -98,9 +98,6 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
             }
         }
         getWindow().setCallback(this);
-        if (this instanceof android.view.SurfaceHolder.Callback) {
-            getWindow().setActivitySurfaceCallback((android.view.SurfaceHolder.Callback) this);
-        }
     }
 
     public void setRequestedOrientation(int requestedOrientation) {

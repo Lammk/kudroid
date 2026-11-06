@@ -23,8 +23,8 @@ public class SecurityStartupTests {
         check("RSA".equals(key.getAlgorithm()) && "X.509".equals(key.getFormat()), "public key metadata");
         copy = key.getEncoded(); copy[0] = 0;
         check(key.getEncoded()[0] == 0x30, "public key encoding is immutable");
-        String[] algorithms = {"SHA224withRSA", "SHA256withRSA", "SHA384withRSA", "SHA512withRSA"};
-        byte[][] signatures = {RsaTestVectors.SHA224, RsaTestVectors.SHA256,
+        String[] algorithms = {"sha1WITHrsa", "SHA224withRSA", "SHA256withRSA", "SHA384withRSA", "SHA512withRSA"};
+        byte[][] signatures = {RsaTestVectors.SHA1, RsaTestVectors.SHA224, RsaTestVectors.SHA256,
                                RsaTestVectors.SHA384, RsaTestVectors.SHA512};
         for (int i = 0; i < algorithms.length; ++i) {
             Signature verifier = Signature.getInstance(algorithms[i]);

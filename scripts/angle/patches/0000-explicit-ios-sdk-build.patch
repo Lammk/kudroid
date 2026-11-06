@@ -1,0 +1,13 @@
+diff --git a/config/ios/ios_sdk.gni b/config/ios/ios_sdk.gni
+index bff6890..0ea6c2c 100644
+--- a/config/ios/ios_sdk.gni
++++ b/config/ios/ios_sdk.gni
+@@ -19,6 +19,8 @@ declare_args() {
+   ios_sdk_path = ""
+   ios_sdk_name = ""
+   ios_sdk_version = ""
++  ios_sdk_build = ""
++  ios_platform_build = ""
+   ios_sdk_platform = ""
+   ios_sdk_platform_path = ""
+   ios_toolchains_path = ""

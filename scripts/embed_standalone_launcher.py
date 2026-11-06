@@ -36,7 +36,9 @@ def embed_ipa(path):
     fd, temporary = tempfile.mkstemp(prefix=path.name + '-', suffix='.tmp', dir=path.parent)
     os.close(fd)
     try:
-        with zipfile.ZipFile(path) as source, zipfile.ZipFile(temporary, 'w', allowZip64=True) as output:
+        with zipfile.ZipFile(path) as source, zipfile.ZipFile(
+            temporary, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
+        ) as output:
             plists = [name for name in source.namelist() if name.startswith('Payload/') and name.count('/') == 2 and name.endswith('/Info.plist')]
             if len(plists) != 1:
                 raise ValueError('IPA must contain exactly one launcher app')
@@ -48,11 +50,17 @@ def embed_ipa(path):
             for entry in source.infolist():
                 if entry.filename == root + RESOURCE:
                     continue
-                with source.open(entry) as incoming, output.open(copy.copy(entry), 'w', force_zip64=entry.file_size >= 0xffffffff) as outgoing:
+                new_entry = copy.copy(entry)
+                if new_entry.is_dir() or new_entry.file_size == 0:
+                    new_entry.compress_type = zipfile.ZIP_STORED
+                else:
+                    new_entry.compress_type = zipfile.ZIP_DEFLATED
+                with source.open(entry) as incoming, output.open(new_entry, 'w', force_zip64=entry.file_size >= 0xffffffff) as outgoing:
                     shutil.copyfileobj(incoming, outgoing, 1024 * 1024)
             entry = zipfile.ZipInfo(root + RESOURCE)
             entry.create_system = 3
             entry.external_attr = 0o100644 << 16
+            entry.compress_type = zipfile.ZIP_DEFLATED
             entry.file_size = source.getinfo(executable).file_size + len(MAGIC)
             with source.open(executable) as binary, output.open(entry, 'w', force_zip64=entry.file_size >= 0xffffffff) as outgoing:
                 outgoing.write(MAGIC)

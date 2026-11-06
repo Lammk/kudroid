@@ -41,6 +41,22 @@ struct ActivityEntry {
     std::vector<MetaDataEntry> metaData;
 };
 
+struct ServiceIntentFilter {
+    std::vector<std::string> actions;
+    std::vector<std::string> categories;
+    int priority = 0;
+    bool hasData = false;
+};
+
+struct ServiceEntry {
+    std::string name;
+    std::string permission;
+    bool enabled = true;
+    bool exported = false;
+    std::vector<ServiceIntentFilter> intentFilters;
+    std::vector<MetaDataEntry> metaData;
+};
+
 // Parsing results AndroidManifest.xml (binary AXML).
 struct ManifestInfo {
     std::string packageName;
@@ -51,6 +67,9 @@ struct ManifestInfo {
     std::string mainActivity; // activity has intent-filter MAIN+LAUNCHER
     std::string appClass;     // android:name on <application>, if any
     std::string applicationTheme;
+    bool applicationEnabled = true;
+    std::string applicationPermission;
+    std::vector<ServiceEntry> services;
 
     // android:appComponentFactory on <application>. Android instantiates this
     // class before any component and routes every Application/Activity/Service/

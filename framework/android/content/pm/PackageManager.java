@@ -136,6 +136,11 @@ public abstract class PackageManager {
         return java.util.Collections.emptyList();
     }
 
+    public ResolveInfo resolveService(Intent intent, int flags) {
+        List<ResolveInfo> services = queryIntentServices(intent, flags);
+        return services.isEmpty() ? null : services.get(0);
+    }
+
     /**
      * Installer of record, or null when unknown.
      *

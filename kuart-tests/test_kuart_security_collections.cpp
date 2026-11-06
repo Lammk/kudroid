@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
     }
     if (!linker.AddDexFile(framework.empty() ? g_framework_dex_bytes : framework.data(),
                           framework.empty() ? g_framework_dex_size : framework.size(), "framework.dex", &error)) return 1;
-    std::ifstream file(KUART_SECURITY_COLLECTIONS_DEX, std::ios::binary);
+    std::ifstream file(argc > 3 ? argv[3] : KUART_SECURITY_COLLECTIONS_DEX, std::ios::binary);
     std::vector<uint8_t> dex((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     if (dex.empty() || !linker.AddDexFile(dex.data(), dex.size(), "regressions.dex", &error)) {
         std::printf("FAIL loading test DEX: %s\n", error.c_str()); return 1;

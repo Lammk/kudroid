@@ -60,6 +60,7 @@ int kudroid_is_jit_enabled(void);
 
 /// Replay the constructor-time reservation diagnostic after logs initialize.
 void kudroid_log_vm_startup_probe(void);
+void kudroid_gpu_prepare_egl(void);
 /// Test and release a full reservation in normal execution context.
 void kudroid_probe_virtual_memory(const char* phase);
 /// Record VM bounds and gaps without changing any mappings.

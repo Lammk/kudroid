@@ -160,6 +160,8 @@ bool DexClass::IsSubClassOf(const DexClass* other) const {
 
     for (const DexClass* k = this; k != nullptr; k = k->superclass) {
         if (k == other) return true;
+        // Concrete class ancestry cannot pass through an interface.
+        if (!other->IsInterface() && !other->is_stub) continue;
         for (const DexClass* iface : k->interfaces) {
             if (iface != nullptr && iface->IsSubClassOf(other)) return true;
         }

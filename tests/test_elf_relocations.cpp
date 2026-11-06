@@ -179,6 +179,79 @@ static void import_scope_fixture() {
     unlink(consumerPath);
 }
 
+#if defined(__linux__)
+static std::string permissions(const void* address) {
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        unsigned long long begin = 0, end = 0;
+        char access[5]{};
+        if (std::sscanf(line.c_str(), "%llx-%llx %4s", &begin, &end, access) == 3 &&
+            reinterpret_cast<uintptr_t>(address) >= begin &&
+            reinterpret_cast<uintptr_t>(address) < end) return access;
+    }
+    return {};
+}
+
+static uint32_t* configuredGlobal;
+static uint32_t constructorValue;
+static void observeConfiguration() { constructorValue = *configuredGlobal; }
+
+static void initialization_fixture(bool finalize, bool initialize) {
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    check(pageSize > 0, "runtime configuration fixture has a native page size");
+    if (pageSize <= 0) return;
+    const size_t page = static_cast<size_t>(pageSize);
+    auto bytes = binding_fixture();
+    bytes.resize(2 * page);
+    auto* header = reinterpret_cast<Elf64_Ehdr*>(bytes.data());
+    header->e_phnum = 3;
+    auto* phdrs = reinterpret_cast<Elf64_Phdr*>(bytes.data() + header->e_phoff);
+    phdrs[2] = phdrs[1];
+    phdrs[0].p_flags = PF_R | PF_X;
+    phdrs[0].p_filesz = phdrs[0].p_memsz = page;
+    phdrs[1] = {PT_LOAD, PF_R | PF_W, page, page, 0, page, page, page};
+    auto* dyn = reinterpret_cast<Elf64_Dyn*>(bytes.data() + 0x180);
+    for (; dyn->d_tag; ++dyn) if (dyn->d_tag == DT_INIT_ARRAY) dyn->d_un.d_val = page + 0xa00;
+    char path[] = "/tmp/kudroid-elf-initialize-XXXXXX";
+    close(mkstemp(path));
+    std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+    kudroid::ElfLoader loader(path);
+    check(loader.parse() && loader.map(), "runtime configuration fixture maps");
+    bool entered = false;
+    constructorValue = 0;
+    const bool loaded = loader.relocate([&] {
+        auto* base = static_cast<char*>(loader.baseAddress());
+        configuredGlobal = reinterpret_cast<uint32_t*>(base + page + 0x100);
+        *reinterpret_cast<void (**)()>(base + page + 0xa00) = observeConfiguration;
+        return finalize;
+    }, [&] {
+        entered = true;
+        auto* base = static_cast<char*>(loader.baseAddress());
+        check(permissions(base + 0x900).substr(0, 3) == "r-x",
+              "runtime configuration runs after executable protections");
+        check(permissions(configuredGlobal).substr(0, 3) == "rw-",
+              "runtime configuration has writable globals");
+        check(!loader.interposeFunction("memcpy", reinterpret_cast<void*>(1)),
+              "runtime configuration cannot reopen finalized bindings");
+        check(constructorValue == 0, "runtime configuration precedes constructors");
+        *configuredGlobal = 42;
+        return initialize;
+    });
+    check(entered == finalize, "failed binding finalization skips runtime configuration");
+    check(loaded == (finalize && initialize), "configuration failures fail relocation");
+    if (loaded) {
+        loader.executeInit();
+        check(constructorValue == 42, "constructors observe configured globals");
+    } else if (finalize) {
+        check(std::strcmp(loader.lastError(), "ELF runtime configuration failed") == 0,
+              "configuration failure reports its phase");
+    }
+    configuredGlobal = nullptr;
+    unlink(path);
+}
+#endif
+
 static void verify_image(bool packed, uint64_t origin, bool legacyRelr = false) {
     char path[] = "/tmp/kudroid-elf-relocations-XXXXXX";
     const int fd = mkstemp(path);
@@ -280,6 +353,11 @@ int main(int argc, char** argv) {
         (reinterpret_cast<Elf64_Rela*>(bytes.data() + 0x780) + 1)->r_info = ELF64_R_INFO(3, R_AARCH64_JUMP_SLOT);
     }, false);
     import_scope_fixture();
+#if defined(__linux__)
+    initialization_fixture(true, true);
+    initialization_fixture(false, true);
+    initialization_fixture(true, false);
+#endif
     verify_image(true, 0);
     verify_image(false, 0);
     verify_image(true, 0, true);
