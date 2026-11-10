@@ -29,6 +29,11 @@ let package = Package(
             sources: [
                 "KuDroidApp.swift",
                 "ContentView.swift",
+                "AppsView.swift",
+                "PermissionsView.swift",
+                "HostLifecycle.swift",
+                "RuntimeTools.swift",
+                "NativeRunner.swift",
                 "APKExport.swift",
                 "AppActions.swift",
                 "DocumentImport.swift",

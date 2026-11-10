@@ -16,11 +16,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, default=root / "build-host-tls")
     parser.add_argument("--framework-dex", type=Path, default=root / "framework/build/framework.dex")
+    parser.add_argument("--skip-build", action="store_true", help="Use the existing host test binary")
     args = parser.parse_args()
     build = args.build_dir.resolve()
-    run(["cmake", "-S", root, "-B", build, "-G", "Ninja",
-         "-DCMAKE_BUILD_TYPE=Release", "-DKUDROID_BUILD_HOST_TESTS=OFF"])
-    run(["cmake", "--build", build, "--target", "test_surface_lifecycle", "-j6"], 240)
+    if not args.skip_build:
+        run(["cmake", "-S", root, "-B", build, "-G", "Ninja",
+             "-DCMAKE_BUILD_TYPE=Release", "-DKUDROID_BUILD_HOST_TESTS=OFF"])
+        run(["cmake", "--build", build, "--target", "test_surface_lifecycle", "-j1"], 240)
     with tempfile.TemporaryDirectory(prefix="kudroid-surface-lifecycle-") as temporary:
         directory = Path(temporary)
         classes = directory / "classes"

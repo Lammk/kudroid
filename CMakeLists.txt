@@ -151,6 +151,7 @@ add_library(kudroid_core STATIC
     src/platform/GraphicsShim.cpp
     src/platform/EglCapabilities.cpp
     src/platform/GlesBackendProbe.cpp
+    src/platform/Es31Compat.cpp
     # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp
     # because it owns a thread and a set of pipes, and nothing else in there does.
     src/platform/FramePacer.cpp
@@ -334,6 +335,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(KuDroidShell MACOSX_BUNDLE
         ios-app/KuDroidShell/KuDroidApp.swift
         ios-app/KuDroidShell/ContentView.swift
+        ios-app/KuDroidShell/AppsView.swift
+        ios-app/KuDroidShell/PermissionsView.swift
+        ios-app/KuDroidShell/HostLifecycle.swift
+        ios-app/KuDroidShell/RuntimeTools.swift
+        ios-app/KuDroidShell/NativeRunner.swift
         ios-app/KuDroidShell/APKExport.swift
         ios-app/KuDroidShell/AppActions.swift
         ios-app/KuDroidShell/DocumentImport.swift
@@ -1046,6 +1052,8 @@ endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     find_package(Threads REQUIRED)
+    add_executable(test_es31_compat tests/test_es31_compat.cpp src/platform/Es31Compat.cpp)
+    target_include_directories(test_es31_compat PRIVATE include)
     add_executable(test_egl_capabilities tests/test_egl_capabilities.cpp)
     target_include_directories(test_egl_capabilities PRIVATE third_party/ANGLE/include)
     target_link_libraries(test_egl_capabilities PRIVATE kudroid_core)

@@ -71,15 +71,15 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
      * Tracks animations currently being played, so that we know what to
      * cancel or end when cancel() or end() is called on this AnimatorSet
      */
-    private ArrayList<Node> mPlayingSet = new ArrayList<Node>();
+    private ArrayList<AnimatorSetNode> mPlayingSet = new ArrayList<AnimatorSetNode>();
 
     /**
      * Contains all nodes, mapped to their respective Animators. When new
      * dependency information is added for an Animator, we want to add it
-     * to a single node representing that Animator, not create a new Node
+     * to a single node representing that Animator, not create a new AnimatorSetNode
      * if one already exists.
      */
-    private ArrayMap<Animator, Node> mNodeMap = new ArrayMap<Animator, Node>();
+    private ArrayMap<Animator, AnimatorSetNode> mNodeMap = new ArrayMap<Animator, AnimatorSetNode>();
 
     /**
      * Contains the start and end events of all the nodes. All these events are sorted in this list.
@@ -91,7 +91,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
      * starting the set, and the nodes are placed in sorted order into the
      * sortedNodes collection.
      */
-    private ArrayList<Node> mNodes = new ArrayList<Node>();
+    private ArrayList<AnimatorSetNode> mNodes = new ArrayList<AnimatorSetNode>();
 
     /**
      * Tracks whether any change has been made to the AnimatorSet, which is then used to
@@ -115,7 +115,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     // relationship captures the order of animation (i.e. parent and child will play sequentially),
     // and sibling relationship indicates "with" relationship, as sibling animators start at the
     // same time.
-    private Node mRootNode = new Node(mDelayAnim);
+    private AnimatorSetNode mRootNode = new AnimatorSetNode(mDelayAnim);
 
     // How long the child animations should last in ms. The default value is negative, which
     // simply means that there is no duration set on the AnimatorSet. When a real duration is
@@ -303,7 +303,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         ArrayList<Animator> childList = new ArrayList<Animator>();
         int size = mNodes.size();
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             if (node != mRootNode) {
                 childList.add(node.mAnimation);
             }
@@ -322,7 +322,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     public void setTarget(Object target) {
         int size = mNodes.size();
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             Animator animation = node.mAnimation;
             if (animation instanceof AnimatorSet) {
                 ((AnimatorSet)animation).setTarget(target);
@@ -420,7 +420,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
                     tmpListeners.get(i).onAnimationCancel(this);
                 }
             }
-            ArrayList<Node> playingSet = new ArrayList<>(mPlayingSet);
+            ArrayList<AnimatorSetNode> playingSet = new ArrayList<>(mPlayingSet);
             int setSize = playingSet.size();
             for (int i = 0; i < setSize; i++) {
                 playingSet.get(i).mAnimation.cancel();
@@ -570,7 +570,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
             // Dependency graph already constructed, update all the nodes' start/end time
             int size = mNodes.size();
             for (int i = 0; i < size; i++) {
-                Node node = mNodes.get(i);
+                AnimatorSetNode node = mNodes.get(i);
                 if (node == mRootNode) {
                     node.mEndTime = mStartDelay;
                 } else {
@@ -623,7 +623,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     public void setupStartValues() {
         int size = mNodes.size();
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             if (node != mRootNode) {
                 node.mAnimation.setupStartValues();
             }
@@ -634,7 +634,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     public void setupEndValues() {
         int size = mNodes.size();
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             if (node != mRootNode) {
                 node.mAnimation.setupEndValues();
             }
@@ -692,7 +692,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     private void initAnimation() {
         if (mInterpolator != null) {
             for (int i = 0; i < mNodes.size(); i++) {
-                Node node = mNodes.get(i);
+                AnimatorSetNode node = mNodes.get(i);
                 node.mAnimation.setInterpolator(mInterpolator);
             }
         }
@@ -711,7 +711,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
 
         int size = mNodes.size();
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             node.mEnded = false;
             node.mAnimation.setAllowRunningAsynchronously(false);
         }
@@ -768,7 +768,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
             // If the duration was set on this AnimatorSet, pass it along to all child animations
             int size = mNodes.size();
             for (int i = 0; i < size; i++) {
-                Node node = mNodes.get(i);
+                AnimatorSetNode node = mNodes.get(i);
                 // TODO: don't set the duration of the timing-only nodes created by AnimatorSet to
                 // insert "play-after" delays
                 node.mAnimation.setDuration(mDuration);
@@ -837,7 +837,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
             inReverse = false;
         }
 
-        ArrayList<Node> unfinishedNodes = new ArrayList<>();
+        ArrayList<AnimatorSetNode> unfinishedNodes = new ArrayList<>();
         // Assumes forward playing from here on.
         for (int i = 0; i < mEvents.size(); i++) {
             AnimationEvent event = mEvents.get(i);
@@ -863,7 +863,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
 
         // Seek unfinished animation to the right time.
         for (int i = 0; i < unfinishedNodes.size(); i++) {
-            Node node = unfinishedNodes.get(i);
+            AnimatorSetNode node = unfinishedNodes.get(i);
             long playTime = getPlayTimeForNode(currentPlayTime, node, inReverse);
             if (!inReverse) {
                 playTime -= node.mAnimation.getStartDelay();
@@ -1056,7 +1056,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
 
         // Pump a frame to the on-going animators
         for (int i = 0; i < mPlayingSet.size(); i++) {
-            Node node = mPlayingSet.get(i);
+            AnimatorSetNode node = mPlayingSet.get(i);
             if (!node.mEnded) {
                 pulseFrame(node, getPlayTimeForNode(unscaledPlayTime, node));
             }
@@ -1114,7 +1114,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
             startId = startId == -1 ? mEvents.size() : startId;
             for (int i = startId - 1; i >= latestId; i--) {
                 AnimationEvent event = mEvents.get(i);
-                Node node = event.mNode;
+                AnimatorSetNode node = event.mNode;
                 if (event.mEvent == AnimationEvent.ANIMATION_END) {
                     if (node.mAnimation.isStarted()) {
                         // If the animation has already been started before its due time (i.e.
@@ -1135,7 +1135,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         } else {
             for (int i = startId + 1; i <= latestId; i++) {
                 AnimationEvent event = mEvents.get(i);
-                Node node = event.mNode;
+                AnimatorSetNode node = event.mNode;
                 if (event.mEvent == AnimationEvent.ANIMATION_START) {
                     mPlayingSet.add(event.mNode);
                     if (node.mAnimation.isStarted()) {
@@ -1163,7 +1163,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
      * @param node child animator node
      * @param animPlayTime unscaled play time (including start delay) for the child animator
      */
-    private void pulseFrame(Node node, long animPlayTime) {
+    private void pulseFrame(AnimatorSetNode node, long animPlayTime) {
         if (!node.mEnded) {
             float durationScale = ValueAnimator.getDurationScale();
             durationScale = durationScale == 0  ? 1 : durationScale;
@@ -1172,11 +1172,11 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         }
     }
 
-    private long getPlayTimeForNode(long overallPlayTime, Node node) {
+    private long getPlayTimeForNode(long overallPlayTime, AnimatorSetNode node) {
         return getPlayTimeForNode(overallPlayTime, node, mReversing);
     }
 
-    private long getPlayTimeForNode(long overallPlayTime, Node node, boolean inReverse) {
+    private long getPlayTimeForNode(long overallPlayTime, AnimatorSetNode node, boolean inReverse) {
         if (inReverse) {
             overallPlayTime = getTotalDuration() - overallPlayTime;
             return node.mEndTime - overallPlayTime;
@@ -1330,7 +1330,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
          * AnimatorSet, because it will copy references that need to be recreated and state
          * that may not apply. What we need to do now is put the clone in an uninitialized
          * state, with fresh, empty data structures. Then we will build up the nodes list
-         * manually, as we clone each Node (and its animation). The clone will then be sorted,
+         * manually, as we clone each AnimatorSetNode (and its animation). The clone will then be sorted,
          * and will populate any appropriate lists, when it is started.
          */
         final int nodeCount = mNodes.size();
@@ -1342,9 +1342,9 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         anim.mPauseTime = -1;
         anim.mSeekState = new SeekState();
         anim.mSelfPulse = true;
-        anim.mPlayingSet = new ArrayList<Node>();
-        anim.mNodeMap = new ArrayMap<Animator, Node>();
-        anim.mNodes = new ArrayList<Node>(nodeCount);
+        anim.mPlayingSet = new ArrayList<AnimatorSetNode>();
+        anim.mNodeMap = new ArrayMap<Animator, AnimatorSetNode>();
+        anim.mNodes = new ArrayList<AnimatorSetNode>(nodeCount);
         anim.mEvents = new ArrayList<AnimationEvent>();
         anim.mDummyListener = new AnimatorListenerAdapter() {
             @Override
@@ -1364,10 +1364,10 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         // One problem is that the old node dependencies point to nodes in the old AnimatorSet.
         // We need to track the old/new nodes in order to reconstruct the dependencies in the clone.
 
-        HashMap<Node, Node> clonesMap = new HashMap<>(nodeCount);
+        HashMap<AnimatorSetNode, AnimatorSetNode> clonesMap = new HashMap<>(nodeCount);
         for (int n = 0; n < nodeCount; n++) {
-            final Node node = mNodes.get(n);
-            Node nodeClone = node.clone();
+            final AnimatorSetNode node = mNodes.get(n);
+            AnimatorSetNode nodeClone = node.clone();
             // Remove the old internal listener from the cloned child
             nodeClone.mAnimation.removeListener(mDummyListener);
             clonesMap.put(node, nodeClone);
@@ -1381,9 +1381,9 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         // Now that we've cloned all of the nodes, we're ready to walk through their
         // dependencies, mapping the old dependencies to the new nodes
         for (int i = 0; i < nodeCount; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             // Update dependencies for node's clone
-            Node nodeClone = clonesMap.get(node);
+            AnimatorSetNode nodeClone = clonesMap.get(node);
             nodeClone.mLatestParent = node.mLatestParent == null
                     ? null : clonesMap.get(node.mLatestParent);
             int size = node.mChildNodes == null ? 0 : node.mChildNodes.size();
@@ -1432,7 +1432,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         String returnVal = "AnimatorSet@" + Integer.toHexString(hashCode()) + "{";
         int size = mNodes.size();
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             returnVal += "\n    " + node.mAnimation.toString();
         }
         return returnVal + "\n}";
@@ -1440,7 +1440,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
 
     private void printChildCount() {
         // Print out the child count through a level traverse.
-        ArrayList<Node> list = new ArrayList<>(mNodes.size());
+        ArrayList<AnimatorSetNode> list = new ArrayList<>(mNodes.size());
         list.add(mRootNode);
         Log.d(TAG, "Current tree: ");
         int index = 0;
@@ -1448,11 +1448,11 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
             int listSize = list.size();
             StringBuilder builder = new StringBuilder();
             for (; index < listSize; index++) {
-                Node node = list.get(index);
+                AnimatorSetNode node = list.get(index);
                 int num = 0;
                 if (node.mChildNodes != null) {
                     for (int i = 0; i < node.mChildNodes.size(); i++) {
-                        Node child = node.mChildNodes.get(i);
+                        AnimatorSetNode child = node.mChildNodes.get(i);
                         if (child.mLatestParent == node) {
                             num++;
                             list.add(child);
@@ -1489,7 +1489,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
             mNodes.get(i).mParentsAdded = false;
         }
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             if (node.mParentsAdded) {
                 continue;
             }
@@ -1511,21 +1511,21 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
 
             // Now make sure all siblings share the same set of parents
             for (int j = 0; j < siblingSize; j++) {
-                Node sibling = node.mSiblings.get(j);
+                AnimatorSetNode sibling = node.mSiblings.get(j);
                 sibling.addParents(node.mParents);
                 sibling.mParentsAdded = true;
             }
         }
 
         for (int i = 0; i < size; i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             if (node != mRootNode && node.mParents == null) {
                 node.addParent(mRootNode);
             }
         }
 
         // Do a DFS on the tree
-        ArrayList<Node> visited = new ArrayList<Node>(mNodes.size());
+        ArrayList<AnimatorSetNode> visited = new ArrayList<AnimatorSetNode>(mNodes.size());
         // Assign start/end time
         mRootNode.mStartTime = 0;
         mRootNode.mEndTime = mDelayAnim.getDuration();
@@ -1540,7 +1540,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         // Create the list including the delay animation.
         mEvents.clear();
         for (int i = 1; i < mNodes.size(); i++) {
-            Node node = mNodes.get(i);
+            AnimatorSetNode node = mNodes.get(i);
             mEvents.add(new AnimationEvent(node, AnimationEvent.ANIMATION_START));
             mEvents.add(new AnimationEvent(node, AnimationEvent.ANIMATION_DELAY_ENDED));
             mEvents.add(new AnimationEvent(node, AnimationEvent.ANIMATION_END));
@@ -1656,12 +1656,12 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
      * the graph, all the nodes on the cycle will be marked to start at {@link #DURATION_INFINITE},
      * meaning they will ever play.
      */
-    private void updatePlayTime(Node parent,  ArrayList<Node> visited) {
+    private void updatePlayTime(AnimatorSetNode parent,  ArrayList<AnimatorSetNode> visited) {
         if (parent.mChildNodes == null) {
             if (parent == mRootNode) {
                 // All the animators are in a cycle
                 for (int i = 0; i < mNodes.size(); i++) {
-                    Node node = mNodes.get(i);
+                    AnimatorSetNode node = mNodes.get(i);
                     if (node != mRootNode) {
                         node.mStartTime = DURATION_INFINITE;
                         node.mEndTime = DURATION_INFINITE;
@@ -1674,7 +1674,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         visited.add(parent);
         int childrenSize = parent.mChildNodes.size();
         for (int i = 0; i < childrenSize; i++) {
-            Node child = parent.mChildNodes.get(i);
+            AnimatorSetNode child = parent.mChildNodes.get(i);
             child.mTotalDuration = child.mAnimation.getTotalDuration();  // Update cached duration.
 
             int index = visited.indexOf(child);
@@ -1713,7 +1713,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     }
 
     // Recursively find all the siblings
-    private void findSiblings(Node node, ArrayList<Node> siblings) {
+    private void findSiblings(AnimatorSetNode node, ArrayList<AnimatorSetNode> siblings) {
         if (!siblings.contains(node)) {
             siblings.add(node);
             if (node.mSiblings == null) {
@@ -1746,10 +1746,10 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         return mTotalDuration;
     }
 
-    private Node getNodeForAnimation(Animator anim) {
-        Node node = mNodeMap.get(anim);
+    private AnimatorSetNode getNodeForAnimation(Animator anim) {
+        AnimatorSetNode node = mNodeMap.get(anim);
         if (node == null) {
-            node = new Node(anim);
+            node = new AnimatorSetNode(anim);
             mNodeMap.put(anim, node);
             mNodes.add(node);
         }
@@ -1757,122 +1757,12 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
     }
 
     /**
-     * A Node is an embodiment of both the Animator that it wraps as well as
+     * A AnimatorSetNode is an embodiment of both the Animator that it wraps as well as
      * any dependencies that are associated with that Animation. This includes
      * both dependencies upon other nodes (in the dependencies list) as
      * well as dependencies of other nodes upon this (in the nodeDependents list).
      */
-    private static class Node implements Cloneable {
-        Animator mAnimation;
 
-        /**
-         * Child nodes are the nodes associated with animations that will be played immediately
-         * after current node.
-         */
-        ArrayList<Node> mChildNodes = null;
-
-        /**
-         * Flag indicating whether the animation in this node is finished. This flag
-         * is used by AnimatorSet to check, as each animation ends, whether all child animations
-         * are mEnded and it's time to send out an end event for the entire AnimatorSet.
-         */
-        boolean mEnded = false;
-
-        /**
-         * Nodes with animations that are defined to play simultaneously with the animation
-         * associated with this current node.
-         */
-        ArrayList<Node> mSiblings;
-
-        /**
-         * Parent nodes are the nodes with animations preceding current node's animation. Parent
-         * nodes here are derived from user defined animation sequence.
-         */
-        ArrayList<Node> mParents;
-
-        /**
-         * Latest parent is the parent node associated with a animation that finishes after all
-         * the other parents' animations.
-         */
-        Node mLatestParent = null;
-
-        boolean mParentsAdded = false;
-        long mStartTime = 0;
-        long mEndTime = 0;
-        long mTotalDuration = 0;
-
-        /**
-         * Constructs the Node with the animation that it encapsulates. A Node has no
-         * dependencies by default; dependencies are added via the addDependency()
-         * method.
-         *
-         * @param animation The animation that the Node encapsulates.
-         */
-        public Node(Animator animation) {
-            this.mAnimation = animation;
-        }
-
-        @Override
-        public Node clone() {
-            try {
-                Node node = (Node) super.clone();
-                node.mAnimation = mAnimation.clone();
-                if (mChildNodes != null) {
-                    node.mChildNodes = new ArrayList<>(mChildNodes);
-                }
-                if (mSiblings != null) {
-                    node.mSiblings = new ArrayList<>(mSiblings);
-                }
-                if (mParents != null) {
-                    node.mParents = new ArrayList<>(mParents);
-                }
-                node.mEnded = false;
-                return node;
-            } catch (CloneNotSupportedException e) {
-               throw new AssertionError();
-            }
-        }
-
-        void addChild(Node node) {
-            if (mChildNodes == null) {
-                mChildNodes = new ArrayList<>();
-            }
-            if (!mChildNodes.contains(node)) {
-                mChildNodes.add(node);
-                node.addParent(this);
-            }
-        }
-
-        public void addSibling(Node node) {
-            if (mSiblings == null) {
-                mSiblings = new ArrayList<Node>();
-            }
-            if (!mSiblings.contains(node)) {
-                mSiblings.add(node);
-                node.addSibling(this);
-            }
-        }
-
-        public void addParent(Node node) {
-            if (mParents == null) {
-                mParents =  new ArrayList<Node>();
-            }
-            if (!mParents.contains(node)) {
-                mParents.add(node);
-                node.addChild(this);
-            }
-        }
-
-        public void addParents(ArrayList<Node> parents) {
-            if (parents == null) {
-                return;
-            }
-            int size = parents.size();
-            for (int i = 0; i < size; i++) {
-                addParent(parents.get(i));
-            }
-        }
-    }
 
     /**
      * This class is a wrapper around a node and an event for the animation corresponding to the
@@ -1887,10 +1777,10 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
         static final int ANIMATION_START = 0;
         static final int ANIMATION_DELAY_ENDED = 1;
         static final int ANIMATION_END = 2;
-        final Node mNode;
+        final AnimatorSetNode mNode;
         final int mEvent;
 
-        AnimationEvent(Node node, int event) {
+        AnimationEvent(AnimatorSetNode node, int event) {
             mNode = node;
             mEvent = event;
         }
@@ -2023,7 +1913,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
          * This tracks the current node being processed. It is supplied to the play() method
          * of AnimatorSet and passed into the constructor of Builder.
          */
-        private Node mCurrentNode;
+        private AnimatorSetNode mCurrentNode;
 
         /**
          * package-private constructor. Builders are only constructed by AnimatorSet, when the
@@ -2045,7 +1935,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
          * {@link AnimatorSet#play(Animator)} method starts.
          */
         public Builder with(Animator anim) {
-            Node node = getNodeForAnimation(anim);
+            AnimatorSetNode node = getNodeForAnimation(anim);
             mCurrentNode.addSibling(node);
             return this;
         }
@@ -2059,7 +1949,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
          * {@link AnimatorSet#play(Animator)} method ends.
          */
         public Builder before(Animator anim) {
-            Node node = getNodeForAnimation(anim);
+            AnimatorSetNode node = getNodeForAnimation(anim);
             mCurrentNode.addChild(node);
             return this;
         }
@@ -2073,7 +1963,7 @@ public final class AnimatorSet extends Animator implements AnimationHandler.Anim
          * {@link AnimatorSet#play(Animator)} method to play.
          */
         public Builder after(Animator anim) {
-            Node node = getNodeForAnimation(anim);
+            AnimatorSetNode node = getNodeForAnimation(anim);
             mCurrentNode.addParent(node);
             return this;
         }

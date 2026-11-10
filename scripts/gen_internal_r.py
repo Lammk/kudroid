@@ -96,22 +96,29 @@ def main():
     w("")
     w("    public static final class attr {")
     w("        private attr() {}")
+    attr_lines = []
     for attr_name, rid in sorted(public.items(), key=lambda kv: (kv[1], kv[0])):
         if attr_name.isidentifier():
-            w("        public static final int %s = 0x%08x;" % (attr_name, rid))
+            attr_lines.append("public static final int %s = 0x%08x;" % (attr_name, rid))
+    for index in range(0, len(attr_lines), 2):
+        w("        " + " ".join(attr_lines[index:index + 2]))
     w("    }")
     w("")
     w("    public static final class styleable {")
     w("        private styleable() {}")
+    arrays = out[:out.index("/** The framework's styleable index tables (public attributes only). */")]
+    arrays.extend(["final class RStyleableArrays {", "    private RStyleableArrays() {}"])
     for name in STYLEABLES:
         if name not in declared:
             sys.exit("styleable %s not found in attrs.xml" % name)
         pairs = sorted({(public[a], a) for a in declared[name] if a in public})
         w("")
-        w("        public static final int[] %s = {" % name)
+        w("        public static final int[] %s = RStyleableArrays.%s();" % (name, name))
+        arrays.append("    static int[] %s() {" % name)
+        arrays.append("        return new int[] {")
         for rid, attr in pairs:
-            w("            0x%08x,  // %s" % (rid, attr))
-        w("        };")
+            arrays.append("            0x%08x,  // %s" % (rid, attr))
+        arrays.extend(["        };", "    }"])
         for index, (rid, attr) in enumerate(pairs):
             w("        public static final int %s_%s = %d;" % (name, attr, index))
     w("    }")
@@ -120,6 +127,10 @@ def main():
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write("\n".join(out))
+    arrays.extend(["}", ""])
+    arrays_path = os.path.join(os.path.dirname(args.out), "RStyleableArrays.java")
+    with open(arrays_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(arrays))
     print("wrote %s (%d styleables)" % (args.out, len(STYLEABLES)))
 
 

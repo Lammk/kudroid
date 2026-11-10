@@ -17,12 +17,13 @@ The table base and count are decoded from that sequence, so nothing here is
 tied to one Unity build. The entries hold pointers into .rodata; those regions
 are copied verbatim into one blob and the pointers are rebased to it.
 
-Output: the blob and the entry array, in the exact shape
-src/platform/FmodVorbisFallback.cpp expects.
+Output: separate payload and entry modules in src/platform/fmod, or a
+directory passed as the second argument.
 """
 
 import struct
 import sys
+from pathlib import Path
 
 ENTRY_SIZE = 32
 
@@ -134,19 +135,24 @@ def main():
     blob = data[vaddr_to_file(segs, blob_base):][:need_end]
     print("blob base 0x%x size %d" % (blob_base, len(blob)))
 
-    out = sys.stdout if len(sys.argv) < 3 else open(sys.argv[2], "w")
+    directory = Path(sys.argv[2]) if len(sys.argv) >= 3 else (
+        Path(__file__).resolve().parents[1] / "src/platform/fmod")
+    directory.mkdir(parents=True, exist_ok=True)
+    out = (directory / "VorbisPayload.inc").open("w")
     out.write("alignas(16) const uint8_t g_fmod_vorbis_data[%d] = {\n" % len(blob))
-    for i in range(0, len(blob), 16):
-        chunk = blob[i:i + 16]
+    for i in range(0, len(blob), 64):
+        chunk = blob[i:i + 64]
         out.write("    " + " ".join("0x%02x," % b for b in chunk) + "\n")
-    out.write("};\n\nalignas(16) FmodVorbisEntry g_fmod_entries[%d] = {\n" % count)
+    out.write("};\n\n")
+    out.close()
+    out = (directory / "VorbisEntries.inc").open("w")
+    out.write("alignas(16) FmodVorbisEntry g_fmod_entries[%d] = {\n" % count)
     for p1, len1, crc, p2, off2, len2 in entries:
         p1s = "g_fmod_vorbis_data + %d" % (p1 - blob_base) if p1 else "nullptr"
         p2s = "g_fmod_vorbis_data + %d" % (p2 - blob_base) if p2 else "nullptr"
         out.write("    { %s, %uu, 0x%08Xu, %s, %d, %d },\n" % (p1s, len1, crc, p2s, off2, len2))
     out.write("};\n")
-    if out is not sys.stdout:
-        out.close()
+    out.close()
 
 
 if __name__ == "__main__":

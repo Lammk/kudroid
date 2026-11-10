@@ -14,6 +14,7 @@
 #include <chrono>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <filesystem>
@@ -513,10 +514,17 @@ static AAssetImpl* open_asset(const char* filename) {
         message += "' under ";
         message += base;
         trace_shim(message.c_str());
+        // Optional directory-listing probes are expected misses; keep them out
+        // of the quota so real asset misses stay visible.
         static std::atomic<int> s_missLogged{0};
-        if (s_missLogged.load() < 15) {
-            ++s_missLogged;
-            kudroid_android_log_message(4, "AssetShim", message.c_str());
+        const std::string_view name(filename);
+        const bool listingProbe = name.size() >= 11 &&
+                                  name.substr(name.size() - 11) == "subdirs.txt";
+        if (!listingProbe) {
+            if (s_missLogged.load() < 300) {
+                ++s_missLogged;
+                kudroid_android_log_message(4, "AssetShim", message.c_str());
+            }
         }
         return nullptr;
     }
@@ -568,8 +576,20 @@ static AAssetImpl* open_asset(const char* filename) {
     // offset is visible in the log without a debugger.
     // FSB5 buffers are also served through this path — without listing them
     // an FMOD load routed here was invisible in the android log.
+    // Progress line: total opens and the latest path, so a stalled loader shows
+    // where it stopped even when the per-extension quota below is exhausted.
+    static std::atomic<uint64_t> s_openTotal{0};
+    const uint64_t openIndex = s_openTotal.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (openIndex % 128 == 0) {
+        char progress[512];
+        std::snprintf(progress, sizeof(progress),
+                      "AAssetManager_open: progress opened=%llu last='%s'",
+                      static_cast<unsigned long long>(openIndex), rel.c_str());
+        kudroid_android_log_message(4, "AssetShim", progress);
+    }
     static const char* kProbedExts[] = {
-        ".json", "aa/", ".bank", ".fsb", ".ogg", ".wav", ".mp3", ".bytes", ".fsbpro"};
+        ".json", "aa/", ".bank", ".fsb", ".ogg", ".wav", ".mp3", ".bytes", ".fsbpro",
+        ".material.bin", ".lang", ".ktx"};
     for (const char* ext : kProbedExts) {
         if (rel.find(ext) == std::string::npos) continue;
         static std::atomic<int> s_hitLogged{0};

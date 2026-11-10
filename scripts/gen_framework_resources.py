@@ -488,8 +488,35 @@ def emit(path, scalars, strings, names, styles):
         w('    "%s"' % esc)
     w("    ;")
     w("")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    write_modules(path, lines)
+
+
+def write_modules(path, lines):
+    directory = os.path.join(os.path.dirname(path), "framework_resources")
+    os.makedirs(directory, exist_ok=True)
+    output = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        output.append(line)
+        index += 1
+        match = re.match(r"static const .*\b(kFramework\w+)\[\] =", line)
+        if not match:
+            continue
+        end = index
+        while end < len(lines) and lines[end].strip() not in ("};", ";"):
+            end += 1
+        if end == len(lines):
+            raise ValueError("Unterminated resource table: " + match[1])
+        rows = lines[index:end]
+        for offset in range(0, len(rows), 1500):
+            name = "%s%d.inc" % (match[1][1:], offset // 1500 + 1)
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as module:
+                module.write("\n".join(rows[offset:offset + 1500]) + "\n")
+            output.append('#include "framework_resources/%s"' % name)
+        index = end
+    with open(path, "w", encoding="utf-8") as file:
+        file.write("\n".join(output))
 
 
 def verify(aosp, public_ids):

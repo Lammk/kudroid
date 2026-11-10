@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+from source_modules import read_source
 
 
 PREAMBLE = r'''
@@ -91,7 +92,7 @@ def main():
     parser.add_argument("--source", type=Path, help="Alternate NativeLooper.cpp for regression checks")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    shim = (root / "src/abi/SyscallShim.cpp").read_text()
+    shim = read_source(root / "src/abi/SyscallShim.cpp")
     shim = shim[shim.index("#define ALOOPER_PREPARE_ALLOW_NON_CALLBACKS"):
                 shim.index("// Bionic symbols game .so commonly import")]
     with tempfile.TemporaryDirectory(prefix="kudroid-native-looper-") as temporary:

@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+from source_modules import read_source
 
 
 PREAMBLE = r'''
@@ -93,7 +94,7 @@ def main():
                         help="Alternate SyscallShim.cpp for a negative regression run")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    source = (args.source or root / "src/abi/SyscallShim.cpp").read_text()
+    source = read_source(args.source or root / "src/abi/SyscallShim.cpp")
     source = source[source.index("static int create_loopback_udp()"):
                     source.index('extern "C" int bionic_epoll_create(int size)')]
     selected, apple = [], False

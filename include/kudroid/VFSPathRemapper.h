@@ -37,6 +37,8 @@ public:
     // saying com.kudroid.app break self-identification (crash reporters,
     // license checks, Unity init); rewritten on the spot, not next init.
     void setPackageName(const std::string& packageName);
+    // Copy of the package last given to setPackageName(); empty before that.
+    [[nodiscard]] std::string packageName() const;
 
 private:
     VFSPathRemapper();

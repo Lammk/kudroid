@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--build-dir", type=Path, default=root / "build-host-tls")
     parser.add_argument("--framework-dex", type=Path, default=root / "framework/build/framework.dex")
     parser.add_argument("--test", action="append")
+    parser.add_argument("--skip-build", action="store_true", help="Use the existing host test binaries")
     parser.add_argument("--openssl-config", type=Path,
                         help="OpenSSL configuration for regression subprocesses only")
     args = parser.parse_args()
@@ -72,9 +73,10 @@ def main():
     if args.openssl_config:
         environment["OPENSSL_CONF"] = str(args.openssl_config.resolve())
     build = args.build_dir.resolve()
-    run(["cmake", "-S", root, "-B", build, "-G", "Ninja",
-         "-DCMAKE_BUILD_TYPE=Release", "-DKUDROID_BUILD_HOST_TESTS=OFF"])
-    run(["cmake", "--build", build, "--target", "test_framework_startup", "test_manifest_services", "-j6"], 240)
+    if not args.skip_build:
+        run(["cmake", "-S", root, "-B", build, "-G", "Ninja",
+             "-DCMAKE_BUILD_TYPE=Release", "-DKUDROID_BUILD_HOST_TESTS=OFF"])
+        run(["cmake", "--build", build, "--target", "test_framework_startup", "test_manifest_services", "-j1"], 240)
     with tempfile.TemporaryDirectory(prefix="kudroid-framework-startup-") as temporary:
         directory = Path(temporary)
         fixture = root / "tests/fixtures/service_manifest.xml"
